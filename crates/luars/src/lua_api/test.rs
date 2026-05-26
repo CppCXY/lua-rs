@@ -8,8 +8,9 @@ mod tests {
     #[cfg(feature = "serde")]
     use crate::lua_api::Value;
     use crate::{
-        GlobalState, LuaApi, LuaAsyncApi, LuaUserData, LuaValueKind, SafeOption, StackApi, Stdlib,
-        lua_api::{Function, Lua, Table},
+        GlobalState, LuaApi, LuaAsyncApi, LuaUserData, LuaValue, LuaValueKind, SafeOption,
+        StackApi, Stdlib,
+        lua_api::{LuaFunction, Lua, LuaTable},
         lua_methods,
     };
     #[cfg(feature = "sandbox")]
@@ -109,12 +110,11 @@ mod tests {
     fn safe_table_round_trip() {
         let mut lua = Lua::new(SafeOption::default());
         let table = lua.create_table_with_capacity(0, 2).unwrap();
+        table.set("host", "localhost").unwrap();
+        table.set("port", 8080_i64).unwrap();
+        lua.globals().set("config", &table).unwrap();
 
-        lua.table_set(&table, "host", "localhost").unwrap();
-        lua.table_set(&table, "port", 8080_i64).unwrap();
-        lua.set_global_table("config", &table).unwrap();
-
-        let config = lua.get_table("config").unwrap().unwrap();
+        let config = lua.globals().get::<LuaTable>("config").unwrap();
         let host: String = config.get("host").unwrap();
         let port: i64 = config.get("port").unwrap();
 
@@ -172,7 +172,7 @@ mod tests {
         let mut lua = Lua::new(SafeOption::default());
         lua.open_stdlib(Stdlib::All).unwrap();
 
-        let obj: Table = lua
+        let obj: LuaTable = lua
             .load(
                 r#"
                 return {
@@ -201,11 +201,11 @@ mod tests {
 
         let table = lua.create_table().unwrap();
         assert!(!table.has_metatable());
-        lua.set_metatable(table.clone(), Some(&metatable)).unwrap();
+        table.set_metatable(Some(&metatable)).unwrap();
+
         assert!(table.has_metatable());
         assert!(table.get_metatable().is_some());
-
-        lua.set_global_table("t", &table).unwrap();
+        lua.globals().set("t", &table).unwrap();
         let answer: i64 = lua.eval("return t.answer").unwrap();
         assert_eq!(answer, 42);
 
@@ -225,7 +225,7 @@ mod tests {
             .unwrap();
 
         let string_mt = lua.get_type_metatable(LuaValueKind::String).unwrap();
-        let index: Table = string_mt.get("__index").unwrap();
+        let index: LuaTable = string_mt.get("__index").unwrap();
         assert_eq!(index.get::<String>("tag").unwrap(), "custom-string");
 
         let tag: String = lua.eval("return ('hello').tag").unwrap();
@@ -261,11 +261,11 @@ mod tests {
         metatable.set("__index", defaults).unwrap();
 
         let table = lua.create_table().unwrap();
-        assert!(lua.get_metatable(table.clone()).unwrap().is_none());
-        lua.set_metatable(table.clone(), Some(&metatable)).unwrap();
-        assert!(lua.get_metatable(table.clone()).unwrap().is_some());
+        assert!(table.get_metatable().is_none());
+        table.set_metatable(Some(&metatable)).unwrap();
+        assert!(table.get_metatable().is_some());
 
-        lua.set_global_table("t", &table).unwrap();
+        lua.globals().set("t", &table).unwrap();
         let answer: i64 = lua.eval("return t.answer").unwrap();
         assert_eq!(answer, 42);
     }
@@ -527,7 +527,7 @@ mod tests {
             .call_async_global1("add_async", (20_i64, 1_i64))
             .await
             .unwrap();
-        let compiled: Function = lua
+        let compiled: LuaFunction = lua
             .load("return function(x) return double_async(x) end")
             .eval()
             .unwrap();
@@ -568,11 +568,11 @@ mod tests {
         let mut lua = Lua::new(SafeOption::default());
         lua.open_stdlib(Stdlib::All).unwrap();
 
-        let table: Table = lua
+        let table: LuaTable = lua
             .load("return { host = 'localhost', port = 8080 }")
             .eval()
             .unwrap();
-        let function: Function = lua
+        let function: LuaFunction = lua
             .load("return function(x) return x * 2 end")
             .eval()
             .unwrap();
@@ -631,46 +631,277 @@ mod tests {
 
         {
             let state = vm.main_state();
-            let base_top = state.checkpoint();
+            let base_top = state.lua_gettop();
 
             state.lua_pushnil().unwrap();
             state.lua_pushboolean(true).unwrap();
             state.lua_pushinteger(42).unwrap();
             state.lua_pushnumber(3.5).unwrap();
             state.lua_pushstring("hello").unwrap();
-            state.lua_pushvalue(crate::LuaValue::integer(7)).unwrap();
+            state.lua_pushlstring(b"a\0b").unwrap();
+            state.lua_pushinteger(7).unwrap();
+            state.lua_pushvalue(-1).unwrap();
 
-            assert_eq!(state.get_top(), base_top + 6);
-            assert!(state.stack_get(base_top).unwrap().is_nil());
-            assert_eq!(
-                state.stack_get(base_top + 1).unwrap().as_boolean(),
-                Some(true)
-            );
-            assert_eq!(
-                state.stack_get(base_top + 2).unwrap().as_integer(),
-                Some(42)
-            );
-            assert_eq!(
-                state.stack_get(base_top + 3).unwrap().as_number(),
-                Some(3.5)
-            );
-            assert_eq!(state.stack_get(base_top + 4).unwrap().to_string(), "hello");
-            assert_eq!(state.stack_get(base_top + 5).unwrap().as_integer(), Some(7));
+            assert_eq!(state.lua_gettop(), base_top + 8);
+            assert_eq!(state.lua_absindex(-1), Some(base_top + 8));
+            assert_eq!(state.lua_absindex(-2), Some(base_top + 7));
+            assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 7);
+            assert_eq!(state.lua_l_checkinteger(-2).unwrap(), 7);
+            assert_eq!(state.lua_l_checklstring(-3).unwrap(), b"a\0b");
+            assert_eq!(state.lua_l_checkstring(-4).unwrap(), "hello");
+            assert_eq!(state.lua_l_checknumber(-5).unwrap(), 3.5);
+            assert_eq!(state.lua_l_checkinteger(-6).unwrap(), 42);
 
-            state.restore(base_top);
+            state.lua_settop(base_top).unwrap();
         }
 
         {
             let state = vm.main_state();
-            let base_top = state.checkpoint();
+            state.lua_settop(0).unwrap();
 
             state.lua_pushinteger(99).unwrap();
             state.lua_pushstring("world").unwrap();
 
-            assert_eq!(state.value_at(base_top).unwrap().as_integer(), Some(99));
-            assert_eq!(state.value_at(base_top + 1).unwrap().to_string(), "world");
+            assert_eq!(state.lua_l_checkinteger(1).unwrap(), 99);
+            assert_eq!(state.lua_l_checkstring(-1).unwrap(), "world");
 
-            state.restore(base_top);
+            state.lua_settop(0).unwrap();
+        }
+    }
+
+    #[test]
+    fn stack_api_supports_args_bytes_and_object_ops() {
+        let mut vm = GlobalState::new(SafeOption::default());
+
+        vm.register_function("stack_api_probe", |state| {
+            assert_eq!(state.lua_gettop(), 3);
+            assert_eq!(state.lua_argcount(), 3);
+            state.lua_l_checkany(1)?;
+
+            let first = state.lua_l_checkinteger(1)?;
+            let second = state.lua_l_checknumber(2)?;
+            let text = state.lua_l_checkstring(3)?;
+            let bytes = state.lua_l_checklstring(3)?;
+            let text_handle = state.lua_tostring_handle(3).unwrap();
+
+            let text_view = state.lua_tostring(3).unwrap();
+            let bytes_view = state.lua_tolstring(3).unwrap();
+
+            assert_eq!(text, "abc");
+            assert_eq!(bytes, b"abc");
+            assert_eq!(text_view, "abc");
+            assert_eq!(bytes_view, b"abc");
+            assert_eq!(text_handle.as_str(), Some("abc"));
+            assert_eq!(text_handle.as_bytes(), Some(&b"abc"[..]));
+
+            state.lua_pushinteger(first + second as i64)?;
+            state.lua_pushlstring(&bytes)?;
+            Ok(2)
+        })
+        .unwrap();
+
+        let results = vm.main_state().execute("return stack_api_probe(40, 2.5, 'abc')").unwrap();
+        assert_eq!(results[0].as_integer(), Some(42));
+        assert_eq!(results[1].as_bytes(), Some(&b"abc"[..]));
+
+        {
+            let state = vm.main_state();
+            state.lua_settop(0).unwrap();
+            let table = state.create_raw_table(0, 2).unwrap();
+            state.push_value(table).unwrap();
+
+            state.lua_pushstring("name").unwrap();
+            state.lua_pushinteger(7).unwrap();
+            state.lua_rawset(1).unwrap();
+
+            state.lua_pushinteger(11).unwrap();
+            state.lua_rawseti(1, 1).unwrap();
+            state.lua_pushinteger(22).unwrap();
+            state.lua_rawseti(1, 2).unwrap();
+
+            state.lua_rawgeti(1, 1).unwrap();
+            assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 11);
+            state.lua_settop(1).unwrap();
+
+            state.lua_rawgeti(1, 2).unwrap();
+            assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 22);
+            state.lua_settop(1).unwrap();
+
+            state.lua_pushstring("name").unwrap();
+            state.lua_rawget(1).unwrap();
+            assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 7);
+            state.lua_settop(1).unwrap();
+
+            state.lua_len(1).unwrap();
+            assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 2);
+            state.lua_settop(1).unwrap();
+
+            state.lua_pushstring("other").unwrap();
+            state.lua_pushinteger(9).unwrap();
+            state.lua_settable(1).unwrap();
+            state.lua_pushstring("other").unwrap();
+            state.lua_gettable(1).unwrap();
+            assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 9);
+            state.lua_settop(1).unwrap();
+
+            state.lua_pushinteger(33).unwrap();
+            state.lua_seti(1, 3).unwrap();
+            state.lua_geti(1, 3).unwrap();
+            assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 33);
+            state.lua_settop(0).unwrap();
+        }
+    }
+
+    #[test]
+    fn stack_api_supports_type_and_conversion_queries() {
+        let mut vm = GlobalState::new(SafeOption::default());
+
+        let state = vm.main_state();
+        state.lua_settop(0).unwrap();
+
+        state.lua_pushnil().unwrap();
+        state.lua_pushboolean(false).unwrap();
+        state.lua_pushinteger(42).unwrap();
+        state.lua_pushnumber(3.5).unwrap();
+        state.lua_pushstring("12").unwrap();
+        state.lua_pushstring("12.5").unwrap();
+        state.lua_pushstring("nope").unwrap();
+
+        assert_eq!(state.lua_type(1), Some(LuaValueKind::Nil));
+        assert_eq!(state.lua_typename(2), Some("boolean"));
+        assert_eq!(state.lua_type(3), Some(LuaValueKind::Integer));
+        assert_eq!(state.lua_type(4), Some(LuaValueKind::Float));
+        assert_eq!(state.lua_type(5), Some(LuaValueKind::String));
+
+        assert!(state.lua_isnil(1));
+        assert!(state.lua_isnone(99));
+        assert!(state.lua_isnoneornil(1));
+        assert!(state.lua_isnoneornil(99));
+        assert!(!state.lua_isnoneornil(2));
+
+        assert!(!state.lua_toboolean(1));
+        assert!(!state.lua_toboolean(2));
+        assert!(state.lua_toboolean(3));
+        assert!(state.lua_toboolean(7));
+
+        assert!(state.lua_isinteger(3));
+        assert!(!state.lua_isinteger(4));
+        assert!(state.lua_isnumber(3));
+        assert!(state.lua_isnumber(4));
+        assert!(state.lua_isnumber(5));
+        assert!(state.lua_isnumber(6));
+        assert!(!state.lua_isnumber(7));
+
+        assert!(state.lua_isstring(3));
+        assert!(state.lua_isstring(4));
+        assert!(state.lua_isstring(5));
+        assert!(!state.lua_isstring(2));
+
+        assert_eq!(state.lua_tointegerx(3), Some(42));
+        assert_eq!(state.lua_tointegerx(5), Some(12));
+        assert_eq!(state.lua_tointegerx(6), None);
+        assert_eq!(state.lua_tointegerx(7), None);
+
+        assert_eq!(state.lua_tonumberx(3), Some(42.0));
+        assert_eq!(state.lua_tonumberx(4), Some(3.5));
+        assert_eq!(state.lua_tonumberx(5), Some(12.0));
+        assert_eq!(state.lua_tonumberx(6), Some(12.5));
+        assert_eq!(state.lua_tonumberx(7), None);
+
+        state.lua_settop(0).unwrap();
+    }
+
+    #[test]
+    fn stack_api_supports_predicates_optargs_and_runtime_objects() {
+        let mut vm = GlobalState::new(SafeOption::default());
+
+        {
+            let state = vm.main_state();
+            state.lua_settop(0).unwrap();
+
+            state.lua_pushboolean(true).unwrap();
+            state.lua_newtable().unwrap();
+            state
+                .lua_pushlightuserdata(std::ptr::dangling_mut::<c_void>())
+                .unwrap();
+            state.lua_pushuserdata(ApiCounter { count: 7 }).unwrap();
+            assert!(state.lua_pushthread().unwrap());
+
+            assert!(state.lua_isboolean(1));
+            assert!(state.lua_istable(2));
+            assert!(state.lua_islightuserdata(3));
+            assert!(state.lua_isuserdata(3));
+            assert!(state.lua_isuserdata(4));
+            assert!(state.lua_isthread(5));
+
+            let counter = state.lua_touserdata_ref::<ApiCounter>(4).unwrap();
+            assert_eq!(counter.get().unwrap().count, 7);
+
+            state.lua_settop(0).unwrap();
+            state.lua_pushinteger(42).unwrap();
+            state.lua_pushnil().unwrap();
+            assert_eq!(state.lua_l_optinteger(1, 10).unwrap(), 42);
+            assert_eq!(state.lua_l_optinteger(2, 10).unwrap(), 10);
+            assert_eq!(state.lua_l_optinteger(3, 10).unwrap(), 10);
+
+            state.lua_settop(0).unwrap();
+            state.lua_pushnumber(2.5).unwrap();
+            state.lua_pushstring("hello").unwrap();
+            state.lua_pushlstring(b"abc").unwrap();
+            assert_eq!(state.lua_l_optnumber(1, 1.5).unwrap(), 2.5);
+            assert_eq!(state.lua_l_optnumber(4, 1.5).unwrap(), 1.5);
+            assert_eq!(state.lua_l_optstring(2, "fallback").unwrap(), "hello");
+            assert_eq!(state.lua_l_optstring(4, "fallback").unwrap(), "fallback");
+            assert_eq!(state.lua_l_optlstring(3, b"fallback").unwrap(), b"abc");
+            assert_eq!(state.lua_l_optlstring(4, b"fallback").unwrap(), b"fallback");
+
+            state.lua_settop(0).unwrap();
+        }
+
+        let func = vm
+            .create_closure_with_upvalues(|_state| Ok(0), vec![LuaValue::integer(11)])
+            .unwrap();
+
+        {
+            let state = vm.main_state();
+            state.lua_settop(0).unwrap();
+            state.push_value(func).unwrap();
+
+            assert!(state.lua_isfunction(1));
+            assert!(!state.lua_iscfunction(1));
+            assert_eq!(state.lua_upvaluecount(1), 1);
+
+            let name = state.lua_getupvalue(1, 1).unwrap();
+            assert_eq!(name, "");
+            assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 11);
+            state.lua_settop(1).unwrap();
+
+            state.lua_pushinteger(99).unwrap();
+            let name = state.lua_setupvalue(1, 1).unwrap().unwrap();
+            assert_eq!(name, "");
+
+            let name = state.lua_getupvalue(1, 1).unwrap();
+            assert_eq!(name, "");
+            assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 99);
+            state.lua_settop(0).unwrap();
+        }
+
+        {
+            let state = vm.main_state();
+            state.lua_settop(0).unwrap();
+
+            state.lua_createtable(1, 1).unwrap();
+            assert!(state.lua_istable(1));
+            state.lua_settop(0).unwrap();
+
+            state.push_value(func).unwrap();
+            state.lua_createthread(1).unwrap();
+            assert!(state.lua_isthread(-1));
+
+            assert!(state.lua_pushthread().unwrap());
+            assert!(state.lua_isthread(-1));
+
+            state.lua_settop(0).unwrap();
         }
     }
 
@@ -706,7 +937,7 @@ mod tests {
     #[test]
     fn table_from_json_and_to_serde_work() {
         let mut lua = Lua::new(SafeOption::default());
-        let table = Table::from_json_value(
+        let table = LuaTable::from_json_value(
             &mut lua,
             &serde_json::json!({
                 "host": "127.0.0.1",
@@ -737,7 +968,7 @@ mod tests {
             tags: vec!["api".to_string(), "beta".to_string()],
         };
 
-        let table = Table::from_serde(&mut lua, &input).unwrap();
+        let table = LuaTable::from_serde(&mut lua, &input).unwrap();
         assert_eq!(table.get::<String>("host").unwrap(), "localhost");
         assert_eq!(table.get::<i64>("port").unwrap(), 3000);
         assert_eq!(

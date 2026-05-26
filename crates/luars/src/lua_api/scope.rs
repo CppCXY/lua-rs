@@ -4,8 +4,8 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::{
-    Chunk, FromLua, FromLuaMulti, Function, IntoLua, LuaError, LuaResult, LuaState, Table, UdValue,
-    UserDataTrait, Value,
+    Chunk, FromLua, FromLuaMulti, IntoLua, LuaError, LuaFunction, LuaResult, LuaState, LuaTable,
+    UdValue, UserDataTrait, Value,
 };
 
 use crate::lua_api::{Lua, LuaApi};
@@ -354,7 +354,7 @@ impl<'scope, 'lua> Scope<'scope, 'lua> {
     }
 
     /// Return a handle to the global environment table.
-    pub fn globals(&mut self) -> Table {
+    pub fn globals(&mut self) -> LuaTable {
         self.lua.globals()
     }
 
@@ -466,12 +466,12 @@ impl Drop for Scope<'_, '_> {
 /// A Lua function handle tied to a lexical scope.
 #[derive(Debug)]
 pub struct ScopedFunction<'scope, 'data> {
-    inner: Function,
+    inner: LuaFunction,
     _marker: PhantomData<(&'scope mut (), &'data ())>,
 }
 
 impl<'scope, 'data> ScopedFunction<'scope, 'data> {
-    fn new(inner: Function) -> Self {
+    fn new(inner: LuaFunction) -> Self {
         ScopedFunction {
             inner,
             _marker: PhantomData,

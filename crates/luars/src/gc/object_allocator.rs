@@ -5,7 +5,7 @@ use crate::lua_value::{
 };
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    LuaFunction, LuaResult, LuaTable, LuaValue,
+    LuaRawFunction, LuaResult, LuaRawTable, LuaValue,
     gc::{
         GC, GcCClosure, GcFunction, GcObjectOwner, GcProto, GcRClosure, GcTable, GcThread,
         GcUpvalue, GcUserdata, ProtoPtr, StringPtr, UpvaluePtr,
@@ -94,7 +94,7 @@ impl ObjectAllocator {
         };
         let size = (base_size + array_bytes + hash_bytes) as u32;
         let ptr = Box::new(GcTable::new(
-            LuaTable::new(array_size as u32, hash_size as u32),
+            LuaRawTable::new(array_size as u32, hash_size as u32),
             current_white,
             size,
         ));
@@ -131,7 +131,7 @@ impl ObjectAllocator {
         let size = std::mem::size_of::<GcFunction>() as u32 + upval_size as u32;
 
         let gc_func = GcObjectOwner::Function(Box::new(GcFunction::new(
-            LuaFunction::new(chunk, upvalue_store),
+            LuaRawFunction::new(chunk, upvalue_store),
             current_white,
             size,
         )));

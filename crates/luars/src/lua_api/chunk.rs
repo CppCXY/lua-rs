@@ -1,4 +1,4 @@
-use crate::{FromLua, FromLuaMulti, Function, IntoLua, Lua, LuaResult, LuaState, StackApi};
+use crate::{FromLua, FromLuaMulti, IntoLua, Lua, LuaFunction, LuaResult, LuaState, StackValueApi};
 #[cfg(feature = "sandbox")]
 use luars::SandboxConfig;
 
@@ -24,7 +24,7 @@ pub trait ChunkHost: Sized {
         chunk_name: &str,
         config: &SandboxConfig,
     ) -> LuaResult<luars::LuaValue>;
-    fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<Function>;
+    fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<LuaFunction>;
     fn call_function_value(&mut self, func: luars::LuaValue) -> LuaResult<Vec<luars::LuaValue>>;
     async fn call_function_value_async(
         &mut self,
@@ -95,7 +95,7 @@ impl<'lua, H: ChunkHost> Chunk<'lua, H> {
     }
 
     /// Compile the chunk and return it as a callable function handle.
-    pub fn into_function(mut self) -> LuaResult<Function> {
+    pub fn into_function(mut self) -> LuaResult<LuaFunction> {
         let value = self.compile_value()?;
         self.lua.value_to_function(value)
     }
@@ -220,7 +220,7 @@ impl ChunkHost for Lua {
         Lua::load_sandboxed_value_with_name(self, source, chunk_name, config)
     }
 
-    fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<Function> {
+    fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<LuaFunction> {
         Lua::value_to_function(self, value)
     }
 
@@ -289,11 +289,11 @@ impl ChunkHost for LuaState {
         LuaState::load_with_name_sandboxed(self, source, chunk_name, config)
     }
 
-    fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<Function> {
+    fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<LuaFunction> {
         let function = self
             .to_function_ref(value)
             .ok_or_else(|| self.error("compiled chunk is not a function".to_string()))?;
-        Ok(Function::new(function))
+        Ok(LuaFunction::new(function))
     }
 
     fn call_function_value(&mut self, func: luars::LuaValue) -> LuaResult<Vec<luars::LuaValue>> {

@@ -9,7 +9,7 @@ use native_table::NativeTable;
 /// With u32, we cover all 26 TmKind values (bits 0-25).
 const MASK_FLAGS: u32 = (1u32 << 26) - 1;
 
-pub struct LuaTable {
+pub struct LuaRawTable {
     meta: TablePtr,
     /// Bit-flag cache for absent metamethods (fasttm).
     /// Bit i set ⇒ TmKind(i) is known absent in this table (when used as a metatable).
@@ -18,7 +18,7 @@ pub struct LuaTable {
     pub(crate) impl_table: NativeTable,
 }
 
-impl LuaTable {
+impl LuaRawTable {
     /// 创建新table
     pub fn new(asize: u32, hsize: u32) -> Self {
         Self {

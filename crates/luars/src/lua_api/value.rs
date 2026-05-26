@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use crate::Lua;
 use crate::{FromLua, IntoLua, LuaAnyRef, LuaResult, LuaState, LuaValueKind, UserDataRef};
 
-use crate::lua_api::{Function, LuaString, Table};
+use crate::lua_api::{LuaFunction, LuaString, LuaTable};
 
 /// Safe handle to any Lua value stored in the registry.
 ///
@@ -45,14 +45,14 @@ impl Value {
 
     /// Try to view the wrapped value as a table handle.
     #[inline]
-    pub fn as_table(&self) -> Option<Table> {
-        self.inner.as_table().map(Table::new)
+    pub fn as_table(&self) -> Option<LuaTable> {
+        self.inner.as_table().map(LuaTable::new)
     }
 
     /// Try to view the wrapped value as a function handle.
     #[inline]
-    pub fn as_function(&self) -> Option<Function> {
-        self.inner.as_function().map(Function::new)
+    pub fn as_function(&self) -> Option<LuaFunction> {
+        self.inner.as_function().map(LuaFunction::new)
     }
 
     /// Try to view the wrapped value as a typed userdata handle.
@@ -85,13 +85,13 @@ impl Value {
 
     /// Get the value's metatable, if present.
     #[inline]
-    pub fn get_metatable(&self) -> Option<Table> {
-        self.inner.get_metatable().map(Table::new)
+    pub fn get_metatable(&self) -> Option<LuaTable> {
+        self.inner.get_metatable().map(LuaTable::new)
     }
 
     /// Set or clear the value's metatable.
     #[inline]
-    pub fn set_metatable(&self, metatable: Option<&Table>) -> LuaResult<()> {
+    pub fn set_metatable(&self, metatable: Option<&LuaTable>) -> LuaResult<()> {
         self.inner
             .set_metatable(metatable.map(|table| &table.inner))
     }

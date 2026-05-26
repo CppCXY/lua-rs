@@ -12,8 +12,8 @@ use luars::{
 
 #[cfg(feature = "sandbox")]
 use crate::LuaSandboxApi;
-use crate::lua_api::{Chunk, Function, LuaString, Scope, Table, Value};
-use crate::{LuaApi, LuaAsyncApi, LuaError, LuaFullError, StackApi};
+use crate::lua_api::{Chunk, LuaFunction, LuaString, Scope, LuaTable, Value};
+use crate::{LuaApi, LuaAsyncApi, LuaError, LuaFullError, StackValueApi};
 
 /// Safe, embedding-oriented Lua runtime.
 ///
@@ -51,7 +51,7 @@ impl Lua {
             .load_with_name(source, chunk_name)
     }
 
-    pub(crate) fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<Function> {
+    pub(crate) fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<LuaFunction> {
         let function = self
             .global_state_owner
             .to_function_ref(value)
@@ -60,7 +60,7 @@ impl Lua {
                     .main_state()
                     .error("compiled chunk is not a function".to_string())
             })?;
-        Ok(Function::new(function))
+        Ok(LuaFunction::new(function))
     }
 
     pub(crate) fn value_to_string(&mut self, value: luars::LuaValue) -> LuaResult<LuaString> {
@@ -166,7 +166,7 @@ impl Lua {
         f(&mut scope)
     }
 
-    pub(crate) fn create_raw_function<F>(&mut self, f: F) -> LuaResult<Function>
+    pub(crate) fn create_raw_function<F>(&mut self, f: F) -> LuaResult<LuaFunction>
     where
         F: Fn(&mut luars::LuaState) -> LuaResult<usize> + 'static,
     {
@@ -256,8 +256,8 @@ impl LuaApi for Lua {
     }
 
     #[inline]
-    fn globals(&mut self) -> Table {
-        Table::new(self.global_state_owner.globals_table())
+    fn globals(&mut self) -> LuaTable {
+        LuaTable::new(self.global_state_owner.globals_table())
     }
 
     #[inline]
@@ -303,13 +303,13 @@ impl LuaApi for Lua {
     }
 
     #[inline]
-    fn create_function<F, Args, R>(&mut self, f: F) -> LuaResult<Function>
+    fn create_function<F, Args, R>(&mut self, f: F) -> LuaResult<LuaFunction>
     where
         F: LuaTypedCallback<Args, R>,
     {
         self.global_state_owner
             .create_function_typed(f)
-            .map(Function::new)
+            .map(LuaFunction::new)
     }
 
     #[inline]
@@ -326,9 +326,9 @@ impl LuaApi for Lua {
     }
 
     #[inline]
-    fn create_type_register_table<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<Table> {
+    fn create_type_register_table<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<LuaTable> {
         self.global_state_owner.register_type_of::<T>(name)?;
-        self.get_table(name)?.ok_or_else(|| {
+        self.get_global::<LuaTable>(name)?.ok_or_else(|| {
             self.global_state_owner.error(format!(
                 "registered type '{}' did not produce a table",
                 name
@@ -347,7 +347,7 @@ impl LuaApi for Lua {
     }
 
     #[inline]
-    fn load_function(&mut self, source: &str) -> LuaResult<Function> {
+    fn load_function(&mut self, source: &str) -> LuaResult<LuaFunction> {
         self.load(source).into_function()
     }
 
@@ -358,15 +358,15 @@ impl LuaApi for Lua {
     }
 
     #[inline]
-    fn create_table(&mut self) -> LuaResult<Table> {
+    fn create_table(&mut self) -> LuaResult<LuaTable> {
         self.create_table_with_capacity(0, 0)
     }
 
     #[inline]
-    fn create_table_with_capacity(&mut self, narr: usize, nrec: usize) -> LuaResult<Table> {
+    fn create_table_with_capacity(&mut self, narr: usize, nrec: usize) -> LuaResult<LuaTable> {
         self.global_state_owner
             .create_table_ref(narr, nrec)
-            .map(Table::new)
+            .map(LuaTable::new)
     }
 
     #[inline]
@@ -391,7 +391,7 @@ impl LuaApi for Lua {
     }
 
     #[inline]
-    fn create_table_from<K, V, I>(&mut self, iter: I) -> LuaResult<Table>
+    fn create_table_from<K, V, I>(&mut self, iter: I) -> LuaResult<LuaTable>
     where
         K: IntoLua,
         V: IntoLua,
@@ -405,7 +405,7 @@ impl LuaApi for Lua {
     }
 
     #[inline]
-    fn create_sequence_from<T, I>(&mut self, iter: I) -> LuaResult<Table>
+    fn create_sequence_from<T, I>(&mut self, iter: I) -> LuaResult<LuaTable>
     where
         T: IntoLua,
         I: IntoIterator<Item = T>,
@@ -415,94 +415,6 @@ impl LuaApi for Lua {
             table.push(value)?;
         }
         Ok(table)
-    }
-
-    #[inline]
-    fn get_function(&mut self, name: &str) -> LuaResult<Option<Function>> {
-        self.global_state_owner
-            .get_global_function(name)
-            .map(|opt| opt.map(Function::new))
-    }
-
-    #[inline]
-    fn get_table(&mut self, name: &str) -> LuaResult<Option<Table>> {
-        self.global_state_owner
-            .get_global_table(name)
-            .map(|opt| opt.map(Table::new))
-    }
-
-    #[inline]
-    fn set_global_table(&mut self, name: &str, table: &Table) -> LuaResult<()> {
-        self.global_state_owner.set_global(name, table.value())
-    }
-
-    #[inline]
-    fn set_global_function(&mut self, name: &str, function: &Function) -> LuaResult<()> {
-        self.global_state_owner
-            .set_global(name, function.inner.to_value())
-    }
-
-    #[inline]
-    fn table_set<T: IntoLua>(&mut self, table: &Table, key: &str, value: T) -> LuaResult<()> {
-        let value = self
-            .global_state_owner
-            .main_state()
-            .collect_single_value(value, "table_set")?;
-        table.inner.set(key, value)
-    }
-
-    #[inline]
-    fn table_seti<T: IntoLua>(&mut self, table: &Table, key: i64, value: T) -> LuaResult<()> {
-        let value = self
-            .global_state_owner
-            .main_state()
-            .collect_single_value(value, "table_seti")?;
-        table.inner.seti(key, value)
-    }
-
-    #[inline]
-    fn table_get<T: FromLua>(&mut self, table: &Table, key: &str) -> LuaResult<T> {
-        let value = table.inner.get(key)?;
-        self.global_state_owner.main_state().from_value(value, "table_get")
-    }
-
-    #[inline]
-    fn table_geti<T: FromLua>(&mut self, table: &Table, key: i64) -> LuaResult<T> {
-        let value = table.inner.geti(key)?;
-        self.global_state_owner.main_state().from_value(value, "table_geti")
-    }
-
-    #[inline]
-    fn table_push<T: IntoLua>(&mut self, table: &Table, value: T) -> LuaResult<()> {
-        let value = self
-            .global_state_owner
-            .main_state()
-            .collect_single_value(value, "table_push")?;
-        table.inner.push(value)
-    }
-
-    #[inline]
-    fn table_pairs<K: FromLua, V: FromLua>(&mut self, table: &Table) -> LuaResult<Vec<(K, V)>> {
-        table.pairs()
-    }
-
-    #[inline]
-    fn table_array<T: FromLua>(&mut self, table: &Table) -> LuaResult<Vec<T>> {
-        table.sequence_values()
-    }
-
-    #[inline]
-    fn get_metatable<T: IntoLua>(&mut self, value: T) -> LuaResult<Option<Table>> {
-        Ok(self.pack(value)?.get_metatable())
-    }
-
-    #[inline]
-    fn set_metatable<T: IntoLua>(&mut self, value: T, metatable: Option<&Table>) -> LuaResult<()> {
-        let value = self.pack(value)?;
-        if let Some(table) = value.as_table() {
-            return table.set_metatable(metatable);
-        }
-        value.set_metatable(metatable)
     }
 
     #[inline]
@@ -552,9 +464,9 @@ impl LuaApi for Lua {
     }
 
     #[inline]
-    fn registry(&mut self) -> Table {
+    fn registry(&mut self) -> LuaTable {
         let registry = self.global_state_owner.registry;
-        Table::new(
+        LuaTable::new(
             self.global_state_owner
                 .to_table_ref(registry)
                 .expect("registry must be a table"),
@@ -587,21 +499,21 @@ impl LuaApi for Lua {
     }
 
     #[inline]
-    fn get_type_metatable(&mut self, kind: LuaValueKind) -> Option<Table> {
+    fn get_type_metatable(&mut self, kind: LuaValueKind) -> Option<LuaTable> {
         let metatable = self.global_state_owner.get_basic_metatable(kind)?;
         self.global_state_owner
             .to_table_ref(metatable)
-            .map(Table::new)
+            .map(LuaTable::new)
     }
 
     #[inline]
     fn set_type_metatable(
         &mut self,
         kind: LuaValueKind,
-        metatable: Option<&Table>,
+        metatable: Option<&LuaTable>,
     ) -> LuaResult<()> {
         self.global_state_owner
-            .set_basic_metatable(kind, metatable.map(Table::value));
+            .set_basic_metatable(kind, metatable.map(LuaTable::value));
         Ok(())
     }
 
@@ -637,7 +549,7 @@ impl LuaAsyncApi for Lua {
 
     async fn call_async<A: IntoLua, R: FromLuaMulti>(
         &mut self,
-        function: &Function,
+        function: &LuaFunction,
         args: A,
     ) -> LuaResult<R> {
         let args = self.pack_multi(args, "call_async")?;
@@ -649,7 +561,7 @@ impl LuaAsyncApi for Lua {
 
     async fn call_async1<A: IntoLua, R: FromLua>(
         &mut self,
-        function: &Function,
+        function: &LuaFunction,
         args: A,
     ) -> LuaResult<R> {
         let args = self.pack_multi(args, "call_async1")?;
@@ -667,7 +579,7 @@ impl LuaAsyncApi for Lua {
         name: &str,
         args: A,
     ) -> LuaResult<R> {
-        let function = self.get_function(name)?.ok_or_else(|| {
+        let function = self.get_global::<LuaFunction>(name)?.ok_or_else(|| {
             self.global_state_owner
                 .main_state()
                 .error(format!("global '{}' not found", name))
@@ -680,7 +592,7 @@ impl LuaAsyncApi for Lua {
         name: &str,
         args: A,
     ) -> LuaResult<R> {
-        let function = self.get_function(name)?.ok_or_else(|| {
+        let function = self.get_global::<LuaFunction>(name)?.ok_or_else(|| {
             self.global_state_owner
                 .main_state()
                 .error(format!("global '{}' not found", name))

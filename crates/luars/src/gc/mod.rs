@@ -42,7 +42,7 @@ mod string_interner;
 use std::collections::HashSet;
 
 use crate::{
-    LuaResult, LuaTable,
+    LuaResult, LuaRawTable,
     lua_value::LuaValue,
     lua_vm::{ErrorMsg, LuaError, LuaState, SafeOption, TmKind},
 };
@@ -70,7 +70,7 @@ use crate::lua_vm::lua_limits::{
 };
 const DEFAULT_PAUSE: i32 = DEFAULT_GC_PAUSE;
 const DEFAULT_STEPMUL: i32 = DEFAULT_GC_STEPMUL;
-const DEFAULT_STEPSIZE: i32 = DEFAULT_GC_STEPMUL * std::mem::size_of::<LuaTable>() as i32; // ~13KB
+const DEFAULT_STEPSIZE: i32 = DEFAULT_GC_STEPMUL * std::mem::size_of::<LuaRawTable>() as i32; // ~13KB
 const DEFAULT_MINORMUL: i32 = DEFAULT_GC_MINORMUL;
 const DEFAULT_MINORMAJOR: i32 = DEFAULT_GC_MINORMAJOR;
 const DEFAULT_MAJORMINOR: i32 = DEFAULT_GC_MAJORMINOR;

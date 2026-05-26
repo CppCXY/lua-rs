@@ -2,13 +2,13 @@ use crate::{FromLua, FromLuaMulti, IntoLua, LuaFunctionRef, LuaResult, LuaValue}
 
 /// Safe wrapper around a callable Lua function handle.
 #[derive(Clone, Debug)]
-pub struct Function {
+pub struct LuaFunction {
     pub(crate) inner: LuaFunctionRef,
 }
 
-impl Function {
+impl LuaFunction {
     pub(crate) fn new(inner: LuaFunctionRef) -> Self {
-        Function { inner }
+        LuaFunction { inner }
     }
 
     /// Call the function and convert all returned values.
@@ -24,7 +24,7 @@ impl Function {
     }
 }
 
-impl IntoLua for Function {
+impl IntoLua for LuaFunction {
     #[inline]
     fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
         state
@@ -34,7 +34,7 @@ impl IntoLua for Function {
     }
 }
 
-impl IntoLua for &Function {
+impl IntoLua for &LuaFunction {
     #[inline]
     fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
         state
@@ -44,12 +44,12 @@ impl IntoLua for &Function {
     }
 }
 
-impl FromLua for Function {
+impl FromLua for LuaFunction {
     fn from_lua(value: LuaValue, state: &mut luars::LuaState) -> Result<Self, String> {
         let actual = value.type_name();
         let function = state
             .to_function_ref(value)
             .ok_or_else(|| format!("expected function, got {}", actual))?;
-        Ok(Function::new(function))
+        Ok(LuaFunction::new(function))
     }
 }

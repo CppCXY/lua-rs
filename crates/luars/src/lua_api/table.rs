@@ -1,14 +1,14 @@
-use crate::{FromLua, FromLuaMulti, Function, IntoLua, LuaResult, LuaTableRef, LuaValue};
+use crate::{FromLua, FromLuaMulti, IntoLua, LuaFunction, LuaResult, LuaTableRef, LuaValue};
 
 /// Safe wrapper around a Lua table handle.
 #[derive(Clone, Debug)]
-pub struct Table {
+pub struct LuaTable {
     pub(crate) inner: LuaTableRef,
 }
 
-impl Table {
+impl LuaTable {
     pub(crate) fn new(inner: LuaTableRef) -> Self {
-        Table { inner }
+        LuaTable { inner }
     }
 
     /// Get and convert a field.
@@ -25,7 +25,7 @@ impl Table {
         };
 
         for key in prefix {
-            current = current.get::<Table>(*key)?;
+            current = current.get::<LuaTable>(*key)?;
         }
 
         current.get(*last)
@@ -45,13 +45,13 @@ impl Table {
 
     /// Get the table's metatable, if present.
     #[inline]
-    pub fn get_metatable(&self) -> Option<Table> {
-        self.inner.get_metatable().map(Table::new)
+    pub fn get_metatable(&self) -> Option<LuaTable> {
+        self.inner.get_metatable().map(LuaTable::new)
     }
 
     /// Set or clear the table's metatable.
     #[inline]
-    pub fn set_metatable(&self, metatable: Option<&Table>) -> LuaResult<()> {
+    pub fn set_metatable(&self, metatable: Option<&LuaTable>) -> LuaResult<()> {
         self.inner
             .set_metatable(metatable.map(|table| &table.inner))
     }
@@ -65,19 +65,19 @@ impl Table {
     /// Get a named function field and call it with `args`.
     #[inline]
     pub fn call_function<A: IntoLua, R: FromLuaMulti>(&self, name: &str, args: A) -> LuaResult<R> {
-        self.get::<Function>(name)?.call(args)
+        self.get::<LuaFunction>(name)?.call(args)
     }
 
     /// Get a named method field and call it with `self` as the first argument.
     #[inline]
     pub fn call_method<A: IntoLua, R: FromLuaMulti>(&self, name: &str, args: A) -> LuaResult<R> {
-        self.get::<Function>(name)?.call((self.clone(), args))
+        self.get::<LuaFunction>(name)?.call((self.clone(), args))
     }
 
     /// Get a named method field and call it, converting only the first result.
     #[inline]
     pub fn call_method1<A: IntoLua, R: FromLua>(&self, name: &str, args: A) -> LuaResult<R> {
-        self.get::<Function>(name)?.call1((self.clone(), args))
+        self.get::<LuaFunction>(name)?.call1((self.clone(), args))
     }
 
     /// Get a field without metamethods.
@@ -160,7 +160,7 @@ impl Table {
         let value = vm
             .deserialize_from_json(json)
             .map_err(|msg| vm.error(msg))?;
-        Table::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
+        LuaTable::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Construct a Lua table from a JSON string inside the provided Lua runtime.
@@ -170,7 +170,7 @@ impl Table {
         let value = vm
             .deserialize_from_json_string(json)
             .map_err(|msg| vm.error(msg))?;
-        Table::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
+        LuaTable::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Construct a Lua table from any serde-serializable Rust value.
@@ -192,7 +192,7 @@ impl Table {
 }
 
 #[cfg(feature = "serde")]
-impl serde::Serialize for Table {
+impl serde::Serialize for LuaTable {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -204,7 +204,7 @@ impl serde::Serialize for Table {
     }
 }
 
-impl IntoLua for Table {
+impl IntoLua for LuaTable {
     #[inline]
     fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
         state
@@ -214,7 +214,7 @@ impl IntoLua for Table {
     }
 }
 
-impl IntoLua for &Table {
+impl IntoLua for &LuaTable {
     #[inline]
     fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
         state
@@ -224,12 +224,12 @@ impl IntoLua for &Table {
     }
 }
 
-impl FromLua for Table {
+impl FromLua for LuaTable {
     fn from_lua(value: LuaValue, state: &mut luars::LuaState) -> Result<Self, String> {
         let actual = value.type_name();
         let table = state
             .to_table_ref(value)
             .ok_or_else(|| format!("expected table, got {}", actual))?;
-        Ok(Table::new(table))
+        Ok(LuaTable::new(table))
     }
 }

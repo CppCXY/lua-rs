@@ -2247,6 +2247,12 @@ impl LuaState {
             .create_closure_with_upvalues(func, upvalues)
     }
 
+    /// Create a raw thread value with an empty stack.
+    #[inline]
+    pub fn create_raw_thread(&mut self) -> CreateResult {
+        self.global_state_mut().create_empty_thread()
+    }
+
     /// Create a registry-rooted table handle.
     #[inline]
     pub fn create_table_ref(&mut self, narr: usize, nrec: usize) -> LuaResult<LuaTableRef> {

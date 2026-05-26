@@ -991,6 +991,18 @@ impl GlobalState {
         self.object_allocator.create_thread(&mut self.gc, thread)
     }
 
+    /// Create an empty thread (coroutine) with no initial function on its stack.
+    pub fn create_empty_thread(&mut self) -> CreateResult {
+        let thread = LuaState::new(
+            1,
+            GlobalStateHandle::from_global(self),
+            false,
+            self.safe_option.clone(),
+        );
+
+        self.object_allocator.create_thread(&mut self.gc, thread)
+    }
+
     /// Resume a coroutine - DEPRECATED: Use thread_state.resume() instead
     /// This method is kept for backward compatibility but delegates to LuaState
     pub fn resume_thread(

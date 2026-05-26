@@ -11,11 +11,11 @@ mod test;
 mod value;
 
 pub use chunk::Chunk;
-pub use function::Function;
+pub use function::LuaFunction;
 pub use lua::Lua;
 pub use lua_string::LuaString;
 pub use scope::{Scope, ScopedFunction, ScopedUserData};
-pub use table::Table;
+pub use table::LuaTable;
 pub use value::Value;
 
 #[cfg(feature = "sandbox")]
@@ -39,14 +39,14 @@ pub trait LuaApi {
     fn eval<R: FromLua>(&mut self, source: &str) -> LuaResult<R>;
     fn eval_multi<R: FromLuaMulti>(&mut self, source: &str) -> LuaResult<R>;
     fn set_global<T: IntoLua>(&mut self, name: &str, value: T) -> LuaResult<()>;
-    fn globals(&mut self) -> Table;
+    fn globals(&mut self) -> LuaTable;
     fn get_global<T: FromLua>(&mut self, name: &str) -> LuaResult<Option<T>>;
     fn call_global<A: IntoLua, R: FromLuaMulti>(&mut self, name: &str, args: A) -> LuaResult<R>;
     fn call_global1<A: IntoLua, R: FromLua>(&mut self, name: &str, args: A) -> LuaResult<R>;
     fn register_function<F, Args, R>(&mut self, name: &str, f: F) -> LuaResult<()>
     where
         F: LuaTypedCallback<Args, R>;
-    fn create_function<F, Args, R>(&mut self, f: F) -> LuaResult<Function>
+    fn create_function<F, Args, R>(&mut self, f: F) -> LuaResult<LuaFunction>
     where
         F: LuaTypedCallback<Args, R>;
     fn register_async_function<F, Args, R>(&mut self, name: &str, f: F) -> LuaResult<()>
@@ -54,14 +54,14 @@ pub trait LuaApi {
         F: LuaTypedAsyncCallback<Args, R>;
     fn register_type_of<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<()>;
     fn register_enum_of<T: LuaEnum>(&mut self, name: &str) -> LuaResult<()>;
-    fn create_type_register_table<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<Table>;
+    fn create_type_register_table<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<LuaTable>;
     fn load<'lua>(&'lua mut self, source: &str) -> Chunk<'lua, Self>
     where
         Self: Sized + chunk::ChunkHost;
-    fn load_function(&mut self, source: &str) -> LuaResult<Function>;
+    fn load_function(&mut self, source: &str) -> LuaResult<LuaFunction>;
     fn create_string(&mut self, value: &str) -> LuaResult<LuaString>;
-    fn create_table(&mut self) -> LuaResult<Table>;
-    fn create_table_with_capacity(&mut self, narr: usize, nrec: usize) -> LuaResult<Table>;
+    fn create_table(&mut self) -> LuaResult<LuaTable>;
+    fn create_table_with_capacity(&mut self, narr: usize, nrec: usize) -> LuaResult<LuaTable>;
     fn create_userdata<T: UserDataTrait + 'static>(&mut self, data: T)
     -> LuaResult<UserDataRef<T>>;
     /// # Safety
@@ -70,29 +70,16 @@ pub trait LuaApi {
         &mut self,
         reference: &mut T,
     ) -> LuaResult<UserDataRef<T>>;
-    fn create_table_from<K, V, I>(&mut self, iter: I) -> LuaResult<Table>
+    fn create_table_from<K, V, I>(&mut self, iter: I) -> LuaResult<LuaTable>
     where
         K: IntoLua,
         V: IntoLua,
         I: IntoIterator<Item = (K, V)>;
-    fn create_sequence_from<T, I>(&mut self, iter: I) -> LuaResult<Table>
+    fn create_sequence_from<T, I>(&mut self, iter: I) -> LuaResult<LuaTable>
     where
         T: IntoLua,
         I: IntoIterator<Item = T>;
-    fn get_function(&mut self, name: &str) -> LuaResult<Option<Function>>;
-    fn get_table(&mut self, name: &str) -> LuaResult<Option<Table>>;
-    fn set_global_table(&mut self, name: &str, table: &Table) -> LuaResult<()>;
-    fn set_global_function(&mut self, name: &str, function: &Function) -> LuaResult<()>;
-    fn table_set<T: IntoLua>(&mut self, table: &Table, key: &str, value: T) -> LuaResult<()>;
-    fn table_seti<T: IntoLua>(&mut self, table: &Table, key: i64, value: T) -> LuaResult<()>;
-    fn table_get<T: FromLua>(&mut self, table: &Table, key: &str) -> LuaResult<T>;
-    fn table_geti<T: FromLua>(&mut self, table: &Table, key: i64) -> LuaResult<T>;
-    fn table_push<T: IntoLua>(&mut self, table: &Table, value: T) -> LuaResult<()>;
-    fn table_pairs<K: FromLua, V: FromLua>(&mut self, table: &Table) -> LuaResult<Vec<(K, V)>>;
-    fn table_array<T: FromLua>(&mut self, table: &Table) -> LuaResult<Vec<T>>;
 
-    fn get_metatable<T: IntoLua>(&mut self, value: T) -> LuaResult<Option<Table>>;
-    fn set_metatable<T: IntoLua>(&mut self, value: T, metatable: Option<&Table>) -> LuaResult<()>;
     fn pack<T: IntoLua>(&mut self, value: T) -> LuaResult<Value>;
     fn unpack<T: FromLua>(&mut self, value: Value) -> LuaResult<T>;
     fn convert<T: IntoLua, U: FromLua>(&mut self, value: T) -> LuaResult<U>;
@@ -100,32 +87,23 @@ pub trait LuaApi {
     fn extra_space(&self) -> *mut c_void;
     fn create_lightuserdata(&mut self, pointer: *mut c_void) -> Value;
     fn to_pointer<T: IntoLua>(&mut self, value: T) -> LuaResult<Option<*const c_void>>;
-    fn registry(&mut self) -> Table;
+    fn registry(&mut self) -> LuaTable;
     fn registry_get<T: FromLua>(&mut self, key: &str) -> LuaResult<Option<T>>;
     fn registry_set<T: IntoLua>(&mut self, key: &str, value: T) -> LuaResult<()>;
     fn registry_geti<T: FromLua>(&mut self, key: i64) -> LuaResult<Option<T>>;
 
-    fn get_type_metatable(&mut self, kind: LuaValueKind) -> Option<Table>;
+    fn get_type_metatable(&mut self, kind: LuaValueKind) -> Option<LuaTable>;
     fn set_type_metatable(
         &mut self,
         kind: LuaValueKind,
-        metatable: Option<&Table>,
+        metatable: Option<&LuaTable>,
     ) -> LuaResult<()>;
     fn get_error_message(&mut self, error: LuaError) -> LuaFullError;
     fn gc_stop(&mut self);
     fn gc_restart(&mut self);
 }
 
-pub trait StackApi {
-    fn checkpoint(&self) -> usize;
-    fn restore(&mut self, top: usize);
-    fn value_at(&self, index: usize) -> Option<LuaValue>;
-    fn lua_pushvalue(&mut self, value: LuaValue) -> LuaResult<()>;
-    fn lua_pushnil(&mut self) -> LuaResult<()>;
-    fn lua_pushboolean(&mut self, value: bool) -> LuaResult<()>;
-    fn lua_pushinteger(&mut self, value: i64) -> LuaResult<()>;
-    fn lua_pushnumber(&mut self, value: f64) -> LuaResult<()>;
-    fn lua_pushstring(&mut self, value: &str) -> LuaResult<()>;
+pub(crate) trait StackValueApi {
     fn collect_values<T: IntoLua>(&mut self, value: T, api_name: &str) -> LuaResult<Vec<LuaValue>>;
     fn collect_single_value<T: IntoLua>(
         &mut self,
@@ -133,6 +111,73 @@ pub trait StackApi {
         api_name: &str,
     ) -> LuaResult<LuaValue>;
     fn from_value<T: FromLua>(&mut self, value: LuaValue, api_name: &str) -> LuaResult<T>;
+}
+
+pub trait StackApi {
+    fn lua_gettop(&self) -> isize;
+    fn lua_settop(&mut self, idx: isize) -> LuaResult<()>;
+    fn lua_absindex(&self, idx: isize) -> Option<isize>;
+    fn lua_type(&self, idx: isize) -> Option<LuaValueKind>;
+    fn lua_typename(&self, idx: isize) -> Option<&'static str>;
+    fn lua_isnone(&self, idx: isize) -> bool;
+    fn lua_isnil(&self, idx: isize) -> bool;
+    fn lua_isnoneornil(&self, idx: isize) -> bool;
+    fn lua_isboolean(&self, idx: isize) -> bool;
+    fn lua_isnumber(&self, idx: isize) -> bool;
+    fn lua_isinteger(&self, idx: isize) -> bool;
+    fn lua_isstring(&self, idx: isize) -> bool;
+    fn lua_istable(&self, idx: isize) -> bool;
+    fn lua_isfunction(&self, idx: isize) -> bool;
+    fn lua_iscfunction(&self, idx: isize) -> bool;
+    fn lua_isuserdata(&self, idx: isize) -> bool;
+    fn lua_islightuserdata(&self, idx: isize) -> bool;
+    fn lua_isthread(&self, idx: isize) -> bool;
+    fn lua_pushvalue(&mut self, idx: isize) -> LuaResult<()>;
+    fn lua_pushnil(&mut self) -> LuaResult<()>;
+    fn lua_pushboolean(&mut self, value: bool) -> LuaResult<()>;
+    fn lua_pushinteger(&mut self, value: i64) -> LuaResult<()>;
+    fn lua_pushnumber(&mut self, value: f64) -> LuaResult<()>;
+    fn lua_pushstring(&mut self, value: &str) -> LuaResult<()>;
+    fn lua_pushlstring(&mut self, value: &[u8]) -> LuaResult<()>;
+    fn lua_pushlightuserdata(&mut self, value: *mut c_void) -> LuaResult<()>;
+    fn lua_argcount(&self) -> isize;
+    fn lua_toboolean(&self, idx: isize) -> bool;
+    fn lua_tointegerx(&self, idx: isize) -> Option<i64>;
+    fn lua_tonumberx(&self, idx: isize) -> Option<f64>;
+    fn lua_tostring<'a>(&'a self, idx: isize) -> Option<&'a str>;
+    fn lua_tolstring<'a>(&'a self, idx: isize) -> Option<&'a [u8]>;
+    fn lua_tostring_handle(&mut self, idx: isize) -> Option<LuaString>;
+    fn lua_l_checkany(&mut self, idx: isize) -> LuaResult<()>;
+    fn lua_l_checkinteger(&mut self, idx: isize) -> LuaResult<i64>;
+    fn lua_l_checknumber(&mut self, idx: isize) -> LuaResult<f64>;
+    fn lua_l_checkstring(&mut self, idx: isize) -> LuaResult<String>;
+    fn lua_l_checklstring(&mut self, idx: isize) -> LuaResult<Vec<u8>>;
+    fn lua_l_optinteger(&mut self, idx: isize, default: i64) -> LuaResult<i64>;
+    fn lua_l_optnumber(&mut self, idx: isize, default: f64) -> LuaResult<f64>;
+    fn lua_l_optstring(&mut self, idx: isize, default: &str) -> LuaResult<String>;
+    fn lua_l_optlstring(&mut self, idx: isize, default: &[u8]) -> LuaResult<Vec<u8>>;
+    fn lua_createtable(&mut self, narr: usize, nrec: usize) -> LuaResult<()>;
+    fn lua_newtable(&mut self) -> LuaResult<()>;
+    fn lua_upvaluecount(&self, idx: isize) -> usize;
+    fn lua_getupvalue(&mut self, func_idx: isize, n: usize) -> Option<String>;
+    fn lua_setupvalue(&mut self, func_idx: isize, n: usize) -> LuaResult<Option<String>>;
+    fn lua_pushuserdata<T: UserDataTrait + 'static>(&mut self, data: T) -> LuaResult<()>;
+    unsafe fn lua_pushuserdata_ref<T: UserDataTrait + 'static>(
+        &mut self,
+        reference: &mut T,
+    ) -> LuaResult<()>;
+    fn lua_touserdata_ref<T: 'static>(&mut self, idx: isize) -> Option<UserDataRef<T>>;
+    fn lua_createthread(&mut self, func_idx: isize) -> LuaResult<()>;
+    fn lua_pushthread(&mut self) -> LuaResult<bool>;
+    fn lua_len(&mut self, idx: isize) -> LuaResult<()>;
+    fn lua_gettable(&mut self, idx: isize) -> LuaResult<()>;
+    fn lua_settable(&mut self, idx: isize) -> LuaResult<()>;
+    fn lua_geti(&mut self, idx: isize, key: i64) -> LuaResult<()>;
+    fn lua_seti(&mut self, idx: isize, key: i64) -> LuaResult<()>;
+    fn lua_rawget(&mut self, idx: isize) -> LuaResult<()>;
+    fn lua_rawset(&mut self, idx: isize) -> LuaResult<()>;
+    fn lua_rawgeti(&mut self, idx: isize, index: i64) -> LuaResult<()>;
+    fn lua_rawseti(&mut self, idx: isize, index: i64) -> LuaResult<()>;
 }
 
 /// Async high-level API shared by safe host-side Lua handles.
@@ -143,12 +188,12 @@ pub trait LuaAsyncApi {
     async fn eval_multi_async<R: FromLuaMulti>(&mut self, source: &str) -> LuaResult<R>;
     async fn call_async<A: IntoLua, R: FromLuaMulti>(
         &mut self,
-        function: &Function,
+        function: &LuaFunction,
         args: A,
     ) -> LuaResult<R>;
     async fn call_async1<A: IntoLua, R: FromLua>(
         &mut self,
-        function: &Function,
+        function: &LuaFunction,
         args: A,
     ) -> LuaResult<R>;
     async fn call_async_global<A: IntoLua, R: FromLuaMulti>(

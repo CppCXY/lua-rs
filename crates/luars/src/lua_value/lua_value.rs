@@ -34,7 +34,7 @@ use crate::gc::{
 };
 use crate::lua_value::{CClosureFunction, LuaUserdata, RClosureFunction, short_string_ptr_eq};
 use crate::lua_vm::{CFunction, LuaState};
-use crate::{LuaFunction, LuaTable};
+use crate::{LuaRawFunction, LuaRawTable};
 
 // ============ Basic type tags (bits 0-3) ============
 // From lua.h
@@ -832,7 +832,7 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub fn as_table(&self) -> Option<&LuaTable> {
+    pub fn as_table(&self) -> Option<&LuaRawTable> {
         if self.ttistable() {
             Some(&self.gc_table().data)
         } else {
@@ -841,19 +841,19 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub(crate) fn hvalue(&self) -> &LuaTable {
+    pub(crate) fn hvalue(&self) -> &LuaRawTable {
         &self.gc_table().data
     }
 
     #[allow(clippy::mut_from_ref)]
     #[inline(always)]
-    pub(crate) fn hvalue_mut(&self) -> &mut LuaTable {
+    pub(crate) fn hvalue_mut(&self) -> &mut LuaRawTable {
         &mut self.gc_table_mut().data
     }
 
     #[allow(clippy::mut_from_ref)]
     #[inline(always)]
-    pub fn as_table_mut(&self) -> Option<&mut LuaTable> {
+    pub fn as_table_mut(&self) -> Option<&mut LuaRawTable> {
         if self.ttistable() {
             Some(&mut self.gc_table_mut().data)
         } else {
@@ -862,7 +862,7 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub fn as_lua_function(&self) -> Option<&LuaFunction> {
+    pub fn as_lua_function(&self) -> Option<&LuaRawFunction> {
         if self.ttisluafunction() {
             Some(&self.gc_function().data)
         } else {
@@ -872,7 +872,7 @@ impl LuaValue {
 
     #[allow(clippy::mut_from_ref)]
     #[inline(always)]
-    pub fn as_lua_function_mut(&self) -> Option<&mut LuaFunction> {
+    pub fn as_lua_function_mut(&self) -> Option<&mut LuaRawFunction> {
         if self.ttisluafunction() {
             Some(&mut self.gc_function_mut().data)
         } else {

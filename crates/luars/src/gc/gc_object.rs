@@ -1,5 +1,5 @@
 use crate::{
-    LuaFunction, LuaProto, LuaTable,
+    LuaRawFunction, LuaProto, LuaRawTable,
     gc::GcObjectKind,
     lua_value::{CClosureFunction, LuaString, LuaUpvalue, LuaUserdata, RClosureFunction},
     lua_vm::LuaState,
@@ -342,8 +342,8 @@ impl<T> HasGcHeader for Gc<T> {
 }
 
 pub type GcString = Gc<LuaString>;
-pub type GcTable = Gc<LuaTable>;
-pub type GcFunction = Gc<LuaFunction>;
+pub type GcTable = Gc<LuaRawTable>;
+pub type GcFunction = Gc<LuaRawFunction>;
 pub type GcCClosure = Gc<CClosureFunction>;
 pub type GcRClosure = Gc<RClosureFunction>;
 pub type GcUpvalue = Gc<LuaUpvalue>;

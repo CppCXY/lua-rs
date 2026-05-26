@@ -19,7 +19,7 @@ pub use userdata_builder::UserDataBuilder;
 pub use userdata_trait::{UserDataTrait, lua_value_to_udvalue, udvalue_to_lua_value};
 
 // Re-export the optimized LuaValue and type enum for pattern matching
-pub use lua_table::LuaTable;
+pub use lua_table::LuaRawTable;
 pub use lua_value::{BIT_ISCOLLECTABLE, LUA_VFALSE, LUA_VNIL, LUA_VNUMFLT, LUA_VNUMINT, LUA_VTRUE};
 pub use lua_value::{LuaValue, LuaValueKind};
 
@@ -505,14 +505,14 @@ impl UpvalueStore {
     }
 }
 
-pub struct LuaFunction {
+pub struct LuaRawFunction {
     chunk: ProtoPtr,
     upvalue_store: UpvalueStore,
 }
 
-impl LuaFunction {
+impl LuaRawFunction {
     pub fn new(chunk: ProtoPtr, upvalue_store: UpvalueStore) -> Self {
-        LuaFunction {
+        LuaRawFunction {
             chunk,
             upvalue_store,
         }

@@ -44,7 +44,7 @@ pub use lib_registry::{LibraryModule, LibraryRegistry, LuaLibrary, PreloadModule
 pub use lua_api::*;
 pub use lua_value::RustCallback;
 pub use lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua};
-pub use lua_value::{LuaFunction, LuaProto, LuaTable, LuaValue, LuaValueKind, chunk_serializer::*};
+pub use lua_value::{LuaRawFunction, LuaProto, LuaRawTable, LuaValue, LuaValueKind, chunk_serializer::*};
 pub use lua_vm::SafeOption;
 #[cfg(feature = "sandbox")]
 pub use lua_vm::SandboxConfig;
