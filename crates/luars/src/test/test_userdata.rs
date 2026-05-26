@@ -350,7 +350,7 @@ fn setup_point_vm() -> Pin<Box<GlobalState>> {
     };
     let ud = LuaUserdata::new(p);
     let state = vm.main_state();
-    let ud_val = state.create_userdata(ud).unwrap();
+    let ud_val = state.create_raw_userdata(ud).unwrap();
     state.set_global("p", ud_val).unwrap();
     vm
 }
@@ -412,9 +412,9 @@ fn test_vm_eq() {
     };
 
     let state = vm.main_state();
-    let v1 = state.create_userdata(LuaUserdata::new(p1)).unwrap();
-    let v2 = state.create_userdata(LuaUserdata::new(p2)).unwrap();
-    let v3 = state.create_userdata(LuaUserdata::new(p3)).unwrap();
+    let v1 = state.create_raw_userdata(LuaUserdata::new(p1)).unwrap();
+    let v2 = state.create_raw_userdata(LuaUserdata::new(p2)).unwrap();
+    let v3 = state.create_raw_userdata(LuaUserdata::new(p3)).unwrap();
     state.set_global("p1", v1).unwrap();
     state.set_global("p2", v2).unwrap();
     state.set_global("p3", v3).unwrap();
@@ -445,8 +445,8 @@ fn test_vm_lt_le() {
     };
 
     let state = vm.main_state();
-    let v1 = state.create_userdata(LuaUserdata::new(p1)).unwrap();
-    let v2 = state.create_userdata(LuaUserdata::new(p2)).unwrap();
+    let v1 = state.create_raw_userdata(LuaUserdata::new(p1)).unwrap();
+    let v2 = state.create_raw_userdata(LuaUserdata::new(p2)).unwrap();
     state.set_global("p1", v1).unwrap();
     state.set_global("p2", v2).unwrap();
 
@@ -501,7 +501,7 @@ fn test_vm_config_readonly() {
         item_count: 10,
     };
     let state = vm.main_state();
-    let ud_val = state.create_userdata(LuaUserdata::new(cfg)).unwrap();
+    let ud_val = state.create_raw_userdata(LuaUserdata::new(cfg)).unwrap();
     state.set_global("cfg", ud_val).unwrap();
 
     // Can read name and version
@@ -785,7 +785,7 @@ fn test_userdata_derive_into_lua_for_typed_call() {
 
     let point = vm
         .main_state()
-        .create_userdata(LuaUserdata::new(point))
+        .create_raw_userdata(LuaUserdata::new(point))
         .unwrap();
     let result = vm.main_state().call(func, vec![point]).unwrap();
     assert_eq!(result[0].as_number(), Some(7.0));
@@ -989,7 +989,7 @@ fn test_data_enum_userdata_instance_method_lookup() {
         height: 6.0,
     });
     let state = vm.main_state();
-    let shape_val = state.create_userdata(shape).unwrap();
+    let shape_val = state.create_raw_userdata(shape).unwrap();
     state.set_global("shape", shape_val).unwrap();
 
     let results = vm
@@ -1230,7 +1230,7 @@ fn setup_number_list_vm() -> Pin<Box<GlobalState>> {
     };
     let ud = LuaUserdata::new(list);
     let state = vm.main_state();
-    let ud_val = state.create_userdata(ud).unwrap();
+    let ud_val = state.create_raw_userdata(ud).unwrap();
     state.set_global("mylist", ud_val).unwrap();
     vm
 }
@@ -1272,7 +1272,7 @@ fn test_userdata_pairs_empty() {
     };
     let ud = LuaUserdata::new(list);
     let state = vm.main_state();
-    let ud_val = state.create_userdata(ud).unwrap();
+    let ud_val = state.create_raw_userdata(ud).unwrap();
     state.set_global("mylist", ud_val).unwrap();
 
     let results = vm
@@ -1336,7 +1336,7 @@ fn test_userdata_pairs_string_vec() {
     };
     let ud = LuaUserdata::new(list);
     let state = vm.main_state();
-    let ud_val = state.create_userdata(ud).unwrap();
+    let ud_val = state.create_raw_userdata(ud).unwrap();
     state.set_global("slist", ud_val).unwrap();
 
     let results = vm
@@ -1408,7 +1408,7 @@ fn test_userdata_call_basic() {
     let adder = Adder { base: 100 };
     let ud = LuaUserdata::new(adder);
     let state = vm.main_state();
-    let ud_val = state.create_userdata(ud).unwrap();
+    let ud_val = state.create_raw_userdata(ud).unwrap();
     state.set_global("add100", ud_val).unwrap();
 
     let results = vm.main_state().execute("return add100(42)").unwrap();
@@ -1423,7 +1423,7 @@ fn test_userdata_call_multiple_args() {
     let adder = Adder { base: 10 };
     let ud = LuaUserdata::new(adder);
     let state = vm.main_state();
-    let ud_val = state.create_userdata(ud).unwrap();
+    let ud_val = state.create_raw_userdata(ud).unwrap();
     state.set_global("add10", ud_val).unwrap();
 
     // Can use field access and call on the same userdata
@@ -1449,7 +1449,7 @@ fn test_userdata_call_in_expression() {
     let adder = Adder { base: 1 };
     let ud = LuaUserdata::new(adder);
     let state = vm.main_state();
-    let ud_val = state.create_userdata(ud).unwrap();
+    let ud_val = state.create_raw_userdata(ud).unwrap();
     state.set_global("inc", ud_val).unwrap();
 
     // Use callable userdata in expressions
@@ -1495,7 +1495,7 @@ fn test_userdata_call_multi_return() {
     let splitter = Splitter;
     let ud = LuaUserdata::new(splitter);
     let state = vm.main_state();
-    let ud_val = state.create_userdata(ud).unwrap();
+    let ud_val = state.create_raw_userdata(ud).unwrap();
     state.set_global("split10", ud_val).unwrap();
 
     let results = vm.main_state().execute("return split10(47)").unwrap();
@@ -1748,7 +1748,7 @@ fn test_manual_lua_close_via_lua_tbc() {
     let mc = ManualClose { closed: false };
     {
         let state = vm.main_state();
-        let ud_val = state.create_userdata(LuaUserdata::new(mc)).unwrap();
+        let ud_val = state.create_raw_userdata(LuaUserdata::new(mc)).unwrap();
         state.set_global("r", ud_val).unwrap();
     }
     // <close> fires lua_close() when r goes out of scope

@@ -1422,7 +1422,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     pc += 1; // skip EXTRAARG
 
-                    let value = lua_state.create_table(vc as usize, vb as usize)?;
+                    let value = lua_state.create_raw_table(vc as usize, vb as usize)?;
                     setobj2s(lua_state, stack_id!(a), &value);
 
                     let new_top = base + a as usize + 1;

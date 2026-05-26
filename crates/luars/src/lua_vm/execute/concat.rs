@@ -85,12 +85,12 @@ pub fn try_concat_pair_utf8(
         append_utf8_piece_to_bytes(&mut bytes, &mut offset, &right);
         let s = std::str::from_utf8(&bytes[..total_len])
             .expect("concat pieces are built from valid UTF-8");
-        lua_state.create_string(s)?
+        lua_state.create_raw_string(s)?
     } else {
         let mut combined = String::with_capacity(total_len);
         append_utf8_piece_to_string(&mut combined, &left);
         append_utf8_piece_to_string(&mut combined, &right);
-        lua_state.create_string_owned(combined)?
+        lua_state.create_raw_string_owned(combined)?
     };
 
     Ok(Some(result))
@@ -125,13 +125,13 @@ fn concat_utf8_run(lua_state: &mut LuaState, top: usize, total: usize) -> LuaRes
         }
         let s = std::str::from_utf8(&bytes[..total_len])
             .expect("concat pieces are built from valid UTF-8");
-        lua_state.create_string(s)?
+        lua_state.create_raw_string(s)?
     } else {
         let mut combined = String::with_capacity(total_len);
         for value in stack.iter().take(top).skip(top - nn) {
             append_utf8_piece_to_string(&mut combined, value);
         }
-        lua_state.create_string_owned(combined)?
+        lua_state.create_raw_string_owned(combined)?
     };
 
     lua_state.stack_mut()[top - nn] = result;
@@ -155,13 +155,13 @@ fn tostring_inplace(lua_state: &mut LuaState, idx: usize) -> LuaResult<bool> {
     if v.ttisinteger() {
         let mut buf = itoa::Buffer::new();
         let s = buf.format(v.ivalue());
-        let sv = lua_state.create_string(s)?;
+        let sv = lua_state.create_raw_string(s)?;
         lua_state.stack_mut()[idx] = sv;
         return Ok(true);
     }
     if v.ttisfloat() {
         let s = lua_float_to_string(v.fltvalue());
-        let sv = lua_state.create_string(&s)?;
+        let sv = lua_state.create_raw_string(&s)?;
         lua_state.stack_mut()[idx] = sv;
         return Ok(true);
     }
@@ -238,7 +238,7 @@ pub fn concat(lua_state: &mut LuaState, mut total: usize) -> LuaResult<()> {
                 let mut buff = Vec::with_capacity(tl);
                 copy2buff(lua_state.stack(), top, nn, &mut buff);
 
-                let result = lua_state.create_bytes(&buff)?;
+                let result = lua_state.create_raw_bytes(&buff)?;
                 lua_state.stack_mut()[top - nn] = result;
                 n = nn;
             }

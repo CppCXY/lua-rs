@@ -150,7 +150,7 @@ impl LuaApi for LuaState {
     where
         F: LuaTypedCallback<Args, R>,
     {
-        let closure = self.create_closure(move |state| f.invoke_typed(state))?;
+        let closure = self.create_raw_closure(move |state| f.invoke_typed(state))?;
         let function = self
             .to_function_ref(closure)
             .expect("created closure must be a function");
@@ -198,7 +198,7 @@ impl LuaApi for LuaState {
     }
 
     fn create_string(&mut self, value: &str) -> LuaResult<LuaString> {
-        let value = LuaState::create_string(self, value)?;
+        let value = LuaState::create_raw_string(self, value)?;
         let string = self
             .global_state_mut()
             .to_string_ref(value)
@@ -211,7 +211,7 @@ impl LuaApi for LuaState {
     }
 
     fn create_table_with_capacity(&mut self, narr: usize, nrec: usize) -> LuaResult<Table> {
-        let table = LuaState::create_table(self, narr, nrec)?;
+        let table = LuaState::create_raw_table(self, narr, nrec)?;
         Ok(Table::new(
             self.to_table_ref(table)
                 .expect("created table must be a table"),
@@ -222,7 +222,7 @@ impl LuaApi for LuaState {
         &mut self,
         data: T,
     ) -> LuaResult<UserDataRef<T>> {
-        let value = LuaState::create_userdata(self, LuaUserdata::new(data))?;
+        let value = LuaState::create_raw_userdata(self, LuaUserdata::new(data))?;
         self.to_userdata_ref(value)
             .ok_or_else(|| self.error("value is not the expected userdata type".to_string()))
     }

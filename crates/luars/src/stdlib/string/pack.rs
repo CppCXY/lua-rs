@@ -811,7 +811,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Create a binary value from bytes - Lua strings can contain arbitrary binary data
-    let packed_val = l.create_binary(result)?;
+    let packed_val = l.create_raw_binary(result)?;
     l.push_value(packed_val)?;
     Ok(1)
 }
@@ -1444,7 +1444,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     return Err(l.error("unfinished string for format 'z'".to_string()));
                 }
                 let str_bytes = &bytes[start..idx];
-                let val = l.create_bytes(str_bytes)?;
+                let val = l.create_raw_bytes(str_bytes)?;
                 results.push(val);
                 idx += 1; // Skip null terminator
             }
@@ -1470,7 +1470,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     return Err(l.error("data string too short".to_string()));
                 }
                 let str_bytes = &bytes[idx..idx + size];
-                let val = l.create_bytes(str_bytes)?;
+                let val = l.create_raw_bytes(str_bytes)?;
                 results.push(val);
                 idx += size;
             }
@@ -1552,7 +1552,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 }
 
                 let str_bytes = &bytes[idx..idx + str_len];
-                let val = l.create_bytes(str_bytes)?;
+                let val = l.create_raw_bytes(str_bytes)?;
                 results.push(val);
                 idx += str_len;
             }

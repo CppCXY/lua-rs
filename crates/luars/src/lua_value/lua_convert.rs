@@ -275,7 +275,7 @@ impl FromLua for String {
 impl IntoLua for String {
     #[inline]
     fn into_lua(self, state: &mut LuaState) -> Result<usize, String> {
-        let s = state.create_string(&self).map_err(|e| format!("{:?}", e))?;
+        let s = state.create_raw_string(&self).map_err(|e| format!("{:?}", e))?;
         state.push_value(s).map_err(|e| format!("{:?}", e))?;
         Ok(1)
     }
@@ -284,7 +284,7 @@ impl IntoLua for String {
 impl IntoLua for &str {
     #[inline]
     fn into_lua(self, state: &mut LuaState) -> Result<usize, String> {
-        let s = state.create_string(self).map_err(|e| format!("{:?}", e))?;
+        let s = state.create_raw_string(self).map_err(|e| format!("{:?}", e))?;
         state.push_value(s).map_err(|e| format!("{:?}", e))?;
         Ok(1)
     }

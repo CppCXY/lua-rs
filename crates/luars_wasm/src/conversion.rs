@@ -283,7 +283,7 @@ pub fn js_to_lua_basic(state: &mut luars::LuaState, value: &JsValue) -> Result<L
         Ok(js_number_to_lua(n))
     } else if let Some(s) = value.as_string() {
         state
-            .create_string(&s)
+            .create_raw_string(&s)
             .map_err(|e| format!("create_string: {:?}", e))
     } else {
         Ok(LuaValue::nil())

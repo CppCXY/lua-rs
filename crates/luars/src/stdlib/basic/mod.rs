@@ -115,7 +115,7 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
                 let message = l.to_string(&msg)?;
                 let where_prefix = lua_where(l, 1);
                 let formatted = format!("{}{}", where_prefix, message);
-                let err_str = l.create_string(&formatted)?;
+                let err_str = l.create_raw_string(&formatted)?;
                 return Err(l.error_with_object(err_str));
             } else {
                 // Non-string: raise as error object (like error(obj, 0))
@@ -126,7 +126,7 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
         // No second argument: default "assertion failed!" with source prefix
         let where_prefix = lua_where(l, 1);
         let formatted = format!("{}assertion failed!", where_prefix);
-        let err_str = l.create_string(&formatted)?;
+        let err_str = l.create_raw_string(&formatted)?;
         return Err(l.error_with_object(err_str));
     }
 
@@ -189,7 +189,7 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
     // literal string object "<no error object>".
     if arg.is_nil() {
         let msg = "<no error object>".to_string();
-        let err_str = l.create_string(&msg)?;
+        let err_str = l.create_raw_string(&msg)?;
         return Err(l.error_with_object(err_str));
     }
 
@@ -201,7 +201,7 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
         let where_prefix = lua_where(l, level as usize);
 
         let formatted_msg = format!("{}{}", where_prefix, message);
-        let err_str = l.create_string(&formatted_msg)?;
+        let err_str = l.create_raw_string(&formatted_msg)?;
         Err(l.error_with_object(err_str))
     } else {
         // Non-string error object or level 0: raise as-is
@@ -379,7 +379,7 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
         let n = value.as_integer_strict().unwrap();
         let mut buf = itoa::Buffer::new();
         let s = buf.format(n);
-        let result_value = l.create_string(s)?;
+        let result_value = l.create_raw_string(s)?;
         l.push_value(result_value)?;
         return Ok(1);
     }
@@ -388,7 +388,7 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
     if value.is_float() {
         let n = value.as_number().unwrap();
         let s = lua_float_to_string(n);
-        let result_value = l.create_string(&s)?;
+        let result_value = l.create_raw_string(&s)?;
         l.push_value(result_value)?;
         return Ok(1);
     }
@@ -408,7 +408,7 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
 
     // General path: metamethods, functions, tables, etc.
     let result = l.to_string(&value)?;
-    let result_value = l.create_string_owned(result)?;
+    let result_value = l.create_raw_string_owned(result)?;
     l.push_value(result_value)?;
     Ok(1)
 }
@@ -784,7 +784,7 @@ fn lua_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
         Some(mt_val) => {
             // Check for __metatable field - if present, return that instead
             if let Some(table) = mt_val.as_table() {
-                let key = l.create_string("__metatable")?;
+                let key = l.create_raw_string("__metatable")?;
                 if let Some(mm) = table.raw_get(&key)
                     && !mm.is_nil()
                 {
@@ -815,7 +815,7 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
         if let Some(existing_mt) = table_ref.get_metatable()
             && let Some(mt_table) = existing_mt.as_table()
         {
-            let key = l.create_string("__metatable")?;
+            let key = l.create_raw_string("__metatable")?;
             let has_protection = mt_table.raw_get(&key).is_some_and(|v| !v.is_nil());
             if has_protection {
                 return Err(l.error("cannot change a protected metatable".to_string()));
@@ -1077,7 +1077,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
             l.change_gc_mode(GcKind::GenMinor);
 
-            let mode_value = l.create_string(old_mode)?;
+            let mode_value = l.create_raw_string(old_mode)?;
             l.push_value(mode_value)?;
             Ok(1)
         }
@@ -1091,7 +1091,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
             l.change_gc_mode(GcKind::Inc);
 
-            let mode_value = l.create_string(old_mode)?;
+            let mode_value = l.create_raw_string(old_mode)?;
             l.push_value(mode_value)?;
             Ok(1)
         }
@@ -1209,7 +1209,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                     // Return nil + error message
                     l.push_value(LuaValue::nil())?;
                     let err_msg =
-                        l.create_string(&format!("error in reader function: {}", error_val))?;
+                        l.create_raw_string(&format!("error in reader function: {}", error_val))?;
                     l.push_value(err_msg)?;
                     return Ok(2);
                 }
@@ -1251,7 +1251,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                 // Return nil + error message like Lua does
                 l.set_top(func_idx)?;
                 l.push_value(LuaValue::nil())?;
-                let err_msg = l.create_string("reader function must return a string")?;
+                let err_msg = l.create_raw_string("reader function must return a string")?;
                 l.push_value(err_msg)?;
                 return Ok(2);
             }
@@ -1295,14 +1295,14 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         // Binary chunk - mode must allow binary ("b" or "bt")
         if !mode.contains('b') {
             l.push_value(LuaValue::nil())?;
-            let err_msg = l.create_string("attempt to load a binary chunk (mode is 'text')")?;
+            let err_msg = l.create_raw_string("attempt to load a binary chunk (mode is 'text')")?;
             l.push_value(err_msg)?;
             return Ok(2);
         }
         if !l.allow_load_bytecode() {
             l.push_value(LuaValue::nil())?;
             let err_msg =
-                l.create_string("attempt to load a binary chunk (bytecode loading is disabled)")?;
+                l.create_raw_string("attempt to load a binary chunk (bytecode loading is disabled)")?;
             l.push_value(err_msg)?;
             return Ok(2);
         }
@@ -1310,7 +1310,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         // Text chunk - mode must allow text ("t" or "bt")
         if !mode.contains('t') {
             l.push_value(LuaValue::nil())?;
-            let err_msg = l.create_string("attempt to load a text chunk (mode is 'binary')")?;
+            let err_msg = l.create_raw_string("attempt to load a text chunk (mode is 'binary')")?;
             l.push_value(err_msg)?;
             return Ok(2);
         }
@@ -1353,15 +1353,15 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                 if i == 0 {
                     // First upvalue is _ENV
                     let env_upvalue_id = if let Some(env) = env {
-                        l.create_upvalue_closed(env)?
+                        l.create_raw_upvalue_closed(env)?
                     } else {
                         let global = l.global_state_mut().global;
-                        l.create_upvalue_closed(global)?
+                        l.create_raw_upvalue_closed(global)?
                     };
                     upvalues.push(env_upvalue_id);
                 } else {
                     // Other upvalues are initialized to nil
-                    let nil_upvalue = l.create_upvalue_closed(LuaValue::nil())?;
+                    let nil_upvalue = l.create_raw_upvalue_closed(LuaValue::nil())?;
                     upvalues.push(nil_upvalue);
                 }
             }
@@ -1374,7 +1374,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         }
         Err(e) => {
             // Return nil and error message
-            let err_msg = l.create_string(&e)?;
+            let err_msg = l.create_raw_string(&e)?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -1407,7 +1407,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
     let file_bytes = match std::fs::read(&filename_str) {
         Ok(b) => b,
         Err(e) => {
-            let err_msg = l.create_string(&format!("cannot open {}: {}", filename_str, e))?;
+            let err_msg = l.create_raw_string(&format!("cannot open {}: {}", filename_str, e))?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             return Ok(2);
@@ -1438,13 +1438,13 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
     // Validate mode
     if !mode.is_empty() && mode.chars().all(|c| c == 'b' || c == 't') {
         if is_binary && !mode.contains('b') {
-            let err_msg = l.create_string("attempt to load a binary chunk (mode is 'text')")?;
+            let err_msg = l.create_raw_string("attempt to load a binary chunk (mode is 'text')")?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             return Ok(2);
         }
         if !is_binary && !mode.contains('t') {
-            let err_msg = l.create_string("attempt to load a text chunk (mode is 'binary')")?;
+            let err_msg = l.create_raw_string("attempt to load a text chunk (mode is 'binary')")?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             return Ok(2);
@@ -1453,7 +1453,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
 
     if is_binary && !l.allow_load_bytecode() {
         let err_msg =
-            l.create_string("attempt to load a binary chunk (bytecode loading is disabled)")?;
+            l.create_raw_string("attempt to load a binary chunk (bytecode loading is disabled)")?;
         l.push_value(LuaValue::nil())?;
         l.push_value(err_msg)?;
         return Ok(2);
@@ -1467,14 +1467,14 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
             for i in 0..upvalue_count {
                 if i == 0 {
                     let env_upvalue_id = if let Some(env) = env_arg {
-                        l.create_upvalue_closed(env)?
+                        l.create_raw_upvalue_closed(env)?
                     } else {
                         let global = l.global_state_mut().global;
-                        l.create_upvalue_closed(global)?
+                        l.create_raw_upvalue_closed(global)?
                     };
                     upvalues.push(env_upvalue_id);
                 } else {
-                    let nil_upvalue = l.create_upvalue_closed(LuaValue::nil())?;
+                    let nil_upvalue = l.create_raw_upvalue_closed(LuaValue::nil())?;
                     upvalues.push(nil_upvalue);
                 }
             }
@@ -1486,7 +1486,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         Err(e) => {
-            let err_msg = l.create_string(&e.to_string())?;
+            let err_msg = l.create_raw_string(&e.to_string())?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -1515,7 +1515,7 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     let proto = l.load_proto_from_file(&filename_str)?;
     let global = l.global_state_mut().global;
     // Create function with _ENV upvalue (global table)
-    let env_upvalue = l.create_upvalue_closed(global)?;
+    let env_upvalue = l.create_raw_upvalue_closed(global)?;
     let func = l
         .global_state_mut()
         .create_function(proto, UpvalueStore::from_single(env_upvalue))?;
@@ -1573,7 +1573,7 @@ fn lua_warn(l: &mut LuaState) -> LuaResult<usize> {
 
     // Get current warn mode from registry ("off", "on", "store")
     let registry = l.global_state_mut().registry;
-    let mode_key = l.create_string("_WARN_MODE")?;
+    let mode_key = l.create_raw_string("_WARN_MODE")?;
     let current_mode = l
         .raw_get(&registry, &mode_key)
         .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -1584,19 +1584,19 @@ fn lua_warn(l: &mut LuaState) -> LuaResult<usize> {
         let control = &parts[0][1..];
         match control {
             "on" => {
-                let mode_val = l.create_string("on")?;
+                let mode_val = l.create_raw_string("on")?;
                 l.raw_set(&registry, mode_key, mode_val);
             }
             "off" => {
-                let mode_val = l.create_string("off")?;
+                let mode_val = l.create_raw_string("off")?;
                 l.raw_set(&registry, mode_key, mode_val);
             }
             "store" => {
-                let mode_val = l.create_string("store")?;
+                let mode_val = l.create_raw_string("store")?;
                 l.raw_set(&registry, mode_key, mode_val);
             }
             "normal" => {
-                let mode_val = l.create_string("on")?;
+                let mode_val = l.create_raw_string("on")?;
                 l.raw_set(&registry, mode_key, mode_val);
             }
             _ => {
@@ -1615,7 +1615,7 @@ fn lua_warn(l: &mut LuaState) -> LuaResult<usize> {
         }
         "store" => {
             // Store in _WARN global
-            let warn_val = l.create_string(&message)?;
+            let warn_val = l.create_raw_string(&message)?;
             l.global_state_mut().set_global("_WARN", warn_val)?;
         }
         _ => {

@@ -20,7 +20,7 @@ fn get_vatab_len(lua_state: &mut LuaState, base: usize, vatab_reg: usize) -> Lua
 
     if let Some(table) = table_val.as_table_mut() {
         // Read the "n" field from the table
-        let n_key = lua_state.create_string("n")?;
+        let n_key = lua_state.create_raw_string("n")?;
         let n_val = table.raw_get(&n_key);
 
         match n_val {
@@ -227,8 +227,8 @@ pub fn exec_varargprep(
         // Create table
         // Use 0 for hash part to encourage ValueArray creation for efficient named varargs
         // ValueArray now supports "n" key natively
-        let table_val = lua_state.create_table(nextra, 0)?;
-        let n_str = lua_state.create_string("n")?;
+        let table_val = lua_state.create_raw_table(nextra, 0)?;
+        let n_str = lua_state.create_raw_string("n")?;
         let n_val = LuaValue::integer(nextra as i64);
 
         // Populate table

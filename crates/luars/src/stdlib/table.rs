@@ -52,7 +52,7 @@ fn table_create(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Create table with pre-allocated sizes
-    let table = l.create_table(na, nh)?;
+    let table = l.create_raw_table(na, nh)?;
     l.push_value(table)?;
     Ok(1)
 }
@@ -113,7 +113,7 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
 
     // If i > j, return empty string immediately
     if i > j {
-        let result = l.create_string("")?;
+        let result = l.create_raw_string("")?;
         l.push_value(result)?;
         return Ok(1);
     }
@@ -167,7 +167,7 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
                     buf.extend_from_slice(lua_float_to_string(f).as_bytes());
                 }
             }
-            let result = l.create_bytes(&buf)?;
+            let result = l.create_raw_bytes(&buf)?;
             l.push_value(result)?;
         } else if !has_numbers {
             // Ultra-fast path: all strings — zero intermediate allocations
@@ -180,7 +180,7 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
                 let value = table.raw_geti(idx).unwrap_or(LuaValue::nil());
                 result.push_str(value.as_str().unwrap());
             }
-            let result = l.create_string_owned(result)?;
+            let result = l.create_raw_string_owned(result)?;
             l.push_value(result)?;
         } else {
             // Strings + numbers path: single allocation, itoa for integers
@@ -200,7 +200,7 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
                     result.push_str(&lua_float_to_string(f));
                 }
             }
-            let result = l.create_string_owned(result)?;
+            let result = l.create_raw_string_owned(result)?;
             l.push_value(result)?;
         }
     } else {
@@ -240,7 +240,7 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
                     buf.extend_from_slice(lua_float_to_string(f).as_bytes());
                 }
             }
-            let result = l.create_bytes(&buf)?;
+            let result = l.create_raw_bytes(&buf)?;
             l.push_value(result)?;
         } else {
             let mut result = String::with_capacity(total_len);
@@ -259,7 +259,7 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
                     result.push_str(&lua_float_to_string(f));
                 }
             }
-            let result = l.create_string_owned(result)?;
+            let result = l.create_raw_string_owned(result)?;
             l.push_value(result)?;
         }
     }
@@ -532,10 +532,10 @@ fn table_move(l: &mut LuaState) -> LuaResult<usize> {
 /// OPTIMIZED: Direct array writes, single GC barrier, no intermediate allocation
 fn table_pack(l: &mut LuaState) -> LuaResult<usize> {
     let n = l.arg_count();
-    let table = l.create_table(n, 1)?;
+    let table = l.create_raw_table(n, 1)?;
 
     // Set 'n' field
-    let n_key = l.create_string("n")?;
+    let n_key = l.create_raw_string("n")?;
 
     // Get raw table pointer — safe because table is on GC heap, not on stack.
     // This avoids per-element vm_mut() → as_table_mut() → set_int indirection.

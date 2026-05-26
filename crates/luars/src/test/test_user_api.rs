@@ -101,6 +101,34 @@ fn test_table_ref_from_global() {
 }
 
 #[test]
+fn test_lua_state_safe_create_refs_survive_gc() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    let state = vm.main_state();
+
+    let key = state.create_string_ref("name").unwrap();
+    let value = state.create_string_ref("rooted").unwrap();
+    let table = state.create_table_ref(0, 1).unwrap();
+
+    state.collect_garbage().unwrap();
+
+    table.set_value(key.to_value(), value.to_value()).unwrap();
+    assert_eq!(table.get("name").unwrap().as_str(), Some("rooted"));
+}
+
+#[test]
+fn test_lua_state_create_userdata_handle_survives_gc() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    let state = vm.main_state();
+
+    let mut counter = state.create_userdata_handle(ApiCounter { count: 7 }).unwrap();
+    state.collect_garbage().unwrap();
+
+    assert_eq!(counter.get().unwrap().count, 7);
+    counter.get_mut().unwrap().count += 5;
+    assert_eq!(counter.get().unwrap().count, 12);
+}
+
+#[test]
 fn test_table_ref_auto_drop() {
     let mut vm = GlobalState::new(SafeOption::default());
 

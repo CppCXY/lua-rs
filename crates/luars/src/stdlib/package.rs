@@ -25,27 +25,27 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
     };
 
     // Create all keys
-    let loaded_key = l.create_string("loaded")?;
-    let preload_key = l.create_string("preload")?;
-    let path_key = l.create_string("path")?;
-    let cpath_key = l.create_string("cpath")?;
-    let config_key = l.create_string("config")?;
-    let searchers_key = l.create_string("searchers")?;
+    let loaded_key = l.create_raw_string("loaded")?;
+    let preload_key = l.create_raw_string("preload")?;
+    let path_key = l.create_raw_string("path")?;
+    let cpath_key = l.create_raw_string("cpath")?;
+    let config_key = l.create_raw_string("config")?;
+    let searchers_key = l.create_raw_string("searchers")?;
 
     // Create all values
-    let loaded_table = l.create_table(0, 0)?;
-    let preload_table = l.create_table(0, 0)?;
-    let path_value = l.create_string("./?.lua;./?/init.lua")?;
-    let cpath_value = l.create_string("./?.so;./?.dll;./?.dylib")?;
+    let loaded_table = l.create_raw_table(0, 0)?;
+    let preload_table = l.create_raw_table(0, 0)?;
+    let path_value = l.create_raw_string("./?.lua;./?/init.lua")?;
+    let cpath_value = l.create_raw_string("./?.so;./?.dll;./?.dylib")?;
 
     #[cfg(windows)]
     let config_str = "\\\n;\n?\n!\n-";
     #[cfg(not(windows))]
     let config_str = "/\n;\n?\n!\n-";
-    let config_value = l.create_string(config_str)?;
+    let config_value = l.create_raw_string(config_str)?;
 
     // Create searchers array
-    let searchers_table_value = l.create_table(4, 0)?;
+    let searchers_table_value = l.create_raw_table(4, 0)?;
     let searchers_table = searchers_table_value.as_table_mut().unwrap();
 
     // Fill searchers array
@@ -64,7 +64,7 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
 
     // Add package itself to package.loaded (normally lib_registry does this,
     // but package.loaded doesn't exist yet when the package module is first loaded)
-    let package_mod_key = l.create_string("package")?;
+    let package_mod_key = l.create_raw_string("package")?;
     l.raw_set(&loaded_table, package_mod_key, package_table);
 
     // Store loaded table and package table in registry for use by require
@@ -108,12 +108,12 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
         // Return error message like Lua 5.5
         let modname_str = modname_val.as_str().unwrap_or("?");
         let err_msg =
-            l.create_string(&format!("\n\tno field package.preload['{}']", modname_str))?;
+            l.create_raw_string(&format!("\n\tno field package.preload['{}']", modname_str))?;
         l.push_value(err_msg)?;
         Ok(1)
     } else {
         l.push_value(loader)?;
-        let preload_str = l.create_string(":preload:")?;
+        let preload_str = l.create_raw_string(":preload:")?;
         l.push_value(preload_str)?;
         Ok(2)
     }
@@ -136,7 +136,7 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("Invalid package table".to_string()));
     };
 
-    let path_key = l.create_string("path")?;
+    let path_key = l.create_raw_string("path")?;
 
     let Some(path_value) = package_table.raw_get(&path_key) else {
         return Err(l.error("'package.path' must be a string".to_string()));
@@ -152,7 +152,7 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
     match result {
         Some(filepath) => {
             l.push_value(LuaValue::cfunction(lua_file_loader))?;
-            let filepath_str = l.create_string(&filepath)?;
+            let filepath_str = l.create_raw_string(&filepath)?;
             l.push_value(filepath_str)?;
             Ok(2)
         }
@@ -165,7 +165,7 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
                     .collect::<Vec<_>>()
                     .join("'\n\tno file '")
             );
-            let err_str = l.create_string(&err)?;
+            let err_str = l.create_raw_string(&err)?;
             l.push_value(err_str)?;
             Ok(1)
         }
@@ -244,7 +244,7 @@ fn searcher_c(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("Invalid package table".to_string()));
     };
 
-    let cpath_key = l.create_string("cpath")?;
+    let cpath_key = l.create_raw_string("cpath")?;
 
     let Some(cpath_value) = package_table.raw_get(&cpath_key) else {
         return Err(l.error("'package.cpath' must be a string".to_string()));
@@ -262,7 +262,7 @@ fn searcher_c(l: &mut LuaState) -> LuaResult<usize> {
             .collect::<Vec<_>>()
             .join("'\n\tno file '")
     );
-    let err_str = l.create_string(&err)?;
+    let err_str = l.create_raw_string(&err)?;
     l.push_value(err_str)?;
     Ok(1)
 }
@@ -292,7 +292,7 @@ fn searcher_c_all_in_one(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("Invalid package table".to_string()));
     };
 
-    let cpath_key = l.create_string("cpath")?;
+    let cpath_key = l.create_raw_string("cpath")?;
 
     let Some(cpath_value) = package_table.raw_get(&cpath_key) else {
         return Err(l.error("'package.cpath' must be a string".to_string()));
@@ -310,7 +310,7 @@ fn searcher_c_all_in_one(l: &mut LuaState) -> LuaResult<usize> {
             .collect::<Vec<_>>()
             .join("'\n\tno file '")
     );
-    let err_str = l.create_string(&err)?;
+    let err_str = l.create_raw_string(&err)?;
     l.push_value(err_str)?;
     Ok(1)
 }
@@ -333,7 +333,7 @@ fn search_path(name: &str, path: &str, sep: &str, rep: &str) -> LuaResult<Option
 }
 
 fn package_loadlib(l: &mut LuaState) -> LuaResult<usize> {
-    let err = l.create_string("loadlib not implemented")?;
+    let err = l.create_raw_string("loadlib not implemented")?;
     l.push_value(LuaValue::nil())?;
     l.push_value(err)?;
     Ok(2)
@@ -379,7 +379,7 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
 
     match search_path(name_str, path_str, sep, rep)? {
         Some(filepath) => {
-            let filepath_str = l.create_string(&filepath)?;
+            let filepath_str = l.create_raw_string(&filepath)?;
             l.push_value(filepath_str)?;
             Ok(1)
         }
@@ -394,7 +394,7 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
                     .join("'\n\tno file '")
             );
             l.push_value(LuaValue::nil())?;
-            let err_str = l.create_string(&err)?;
+            let err_str = l.create_raw_string(&err)?;
             l.push_value(err_str)?;
             Ok(2)
         }

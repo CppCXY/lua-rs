@@ -609,8 +609,8 @@ mod tests {
         lua.open_stdlib(Stdlib::All).unwrap();
 
         lua.install_library(crate::lua_preload_module!("test_install_module" => |l| {
-            let table = l.create_table(0, 1)?;
-            let key = l.create_string("value")?;
+            let table = l.create_raw_table(0, 1)?;
+            let key = l.create_raw_string("value")?;
             l.global_state_mut().raw_set(&table, key, crate::LuaValue::integer(42));
             l.push_value(table)?;
             Ok(1)
