@@ -4,6 +4,15 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PagedPoolStats {
+    pub page_count: usize,
+    pub total_slots: usize,
+    pub live_slots: usize,
+    pub free_slots: usize,
+    pub retained_bytes: usize,
+}
+
 struct PageSlot<T> {
     occupied: bool,
     value: MaybeUninit<T>,
@@ -31,15 +40,18 @@ impl<T> PageSlot<T> {
 struct PagedPoolInner<T> {
     pages: Vec<Box<[PageSlot<T>]>>,
     free_slots: Vec<NonNull<PageSlot<T>>>,
+    min_page_len: usize,
     next_page_len: usize,
 }
 
 impl<T> PagedPoolInner<T> {
     fn with_page_len(page_len: usize) -> Self {
+        let page_len = page_len.max(1);
         Self {
             pages: Vec::new(),
             free_slots: Vec::new(),
-            next_page_len: page_len.max(1),
+            min_page_len: page_len,
+            next_page_len: page_len,
         }
     }
 
@@ -55,6 +67,35 @@ impl<T> PagedPoolInner<T> {
 
         self.pages.push(page);
         self.next_page_len = page_len.saturating_mul(2);
+    }
+
+    fn release_empty_pages(&mut self) -> usize {
+        let mut released_pages = 0;
+        let mut kept_pages = Vec::with_capacity(self.pages.len());
+
+        for page in self.pages.drain(..) {
+            if page.iter().any(|slot| slot.occupied) {
+                kept_pages.push(page);
+            } else {
+                released_pages += 1;
+            }
+        }
+
+        self.free_slots.clear();
+        for page in kept_pages.iter_mut() {
+            for slot in page.iter_mut().rev() {
+                if !slot.occupied {
+                    self.free_slots.push(NonNull::from(slot));
+                }
+            }
+        }
+
+        self.next_page_len = kept_pages
+            .last()
+            .map(|page| page.len().saturating_mul(2))
+            .unwrap_or(self.min_page_len);
+        self.pages = kept_pages;
+        released_pages
     }
 }
 
@@ -105,6 +146,23 @@ impl<T> PagedPool<T> {
                 },
             }
         }
+    }
+
+    pub fn stats(&self) -> PagedPoolStats {
+        let inner = self.inner.borrow();
+        let total_slots = inner.pages.iter().map(|page| page.len()).sum::<usize>();
+        let free_slots = inner.free_slots.len();
+        PagedPoolStats {
+            page_count: inner.pages.len(),
+            total_slots,
+            live_slots: total_slots.saturating_sub(free_slots),
+            free_slots,
+            retained_bytes: total_slots * std::mem::size_of::<PageSlot<T>>(),
+        }
+    }
+
+    pub fn release_empty_pages(&mut self) -> usize {
+        self.inner.borrow_mut().release_empty_pages()
     }
 }
 
@@ -232,5 +290,23 @@ mod tests {
         let reused = pool.alloc(9u32);
         assert_eq!(first_ptr, reused.as_ptr());
         assert_eq!(9, *reused);
+    }
+
+    #[test]
+    fn empty_pages_are_released_without_moving_live_slots() {
+        let mut pool = PagedPool::new(2);
+        let first = pool.alloc(1u32);
+        let second = pool.alloc(2u32);
+        let third = pool.alloc(3u32);
+        let third_ptr = third.as_ptr();
+
+        drop(first);
+        drop(second);
+
+        assert_eq!(2, pool.stats().page_count);
+        assert_eq!(1, pool.release_empty_pages());
+        assert_eq!(1, pool.stats().page_count);
+        assert_eq!(third_ptr, third.as_ptr());
+        assert_eq!(3, *third);
     }
 }

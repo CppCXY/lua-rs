@@ -37,6 +37,18 @@ pub enum ShortStrSetResult {
     FinishNewKey,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TableMemoryLayoutStats {
+    pub array_capacity_elems: usize,
+    pub array_live_elems: usize,
+    pub array_capacity_bytes: usize,
+    pub array_live_bytes: usize,
+    pub hash_capacity_nodes: usize,
+    pub hash_live_nodes: usize,
+    pub hash_capacity_bytes: usize,
+    pub hash_live_bytes: usize,
+}
+
 impl Node {
     /// Read value as LuaValue
     #[inline(always)]
@@ -199,6 +211,57 @@ impl NativeTable {
     #[inline(always)]
     fn hash_mem_bytes(sizenode: usize) -> isize {
         (sizenode * std::mem::size_of::<Node>()) as isize
+    }
+
+    pub fn memory_layout_stats(&self) -> TableMemoryLayoutStats {
+        let array_capacity_elems = self.asize as usize;
+        let array_capacity_bytes = Self::array_mem_bytes(self.asize) as usize;
+        let mut array_live_elems = 0;
+
+        if !self.array.is_null() {
+            for index in 0..array_capacity_elems {
+                unsafe {
+                    let tag = *self.get_arr_tag(index);
+                    if tag != LUA_VNIL && tag != LUA_VEMPTY {
+                        array_live_elems += 1;
+                    }
+                }
+            }
+        }
+
+        let hash_capacity_nodes = self.sizenode();
+        let hash_capacity_bytes = Self::hash_mem_bytes(hash_capacity_nodes) as usize;
+        let mut hash_live_nodes = 0;
+
+        if !self.node.is_null() {
+            for index in 0..hash_capacity_nodes {
+                unsafe {
+                    let node = self.node.add(index);
+                    if novariant((*node).key_tt) != LUA_TNIL && (*node).val_tt != LUA_VNIL {
+                        hash_live_nodes += 1;
+                    }
+                }
+            }
+        }
+
+        let array_slot_bytes = std::mem::size_of::<Value>() + 1;
+        let array_live_bytes = if array_live_elems == 0 {
+            0
+        } else {
+            array_live_elems * array_slot_bytes + std::mem::size_of::<u32>()
+        };
+        let hash_live_bytes = hash_live_nodes * std::mem::size_of::<Node>();
+
+        TableMemoryLayoutStats {
+            array_capacity_elems,
+            array_live_elems,
+            array_capacity_bytes,
+            array_live_bytes,
+            hash_capacity_nodes,
+            hash_live_nodes,
+            hash_capacity_bytes,
+            hash_live_bytes,
+        }
     }
 
     /// Get hash size (number of nodes)
@@ -1710,6 +1773,11 @@ impl NativeTable {
                     return (true, delta);
                 }
             }
+        }
+
+        if key.is_short_string() {
+            let result = self.pset_shortstr(&key, value);
+            return self.finish_shortstr_set(&key, value, result);
         }
 
         // Not in array range - use hash part

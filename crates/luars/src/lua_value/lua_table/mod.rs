@@ -6,7 +6,7 @@ use crate::{
     LuaError, LuaResult,
     gc::{TableAllocHandle, TablePtr},
 };
-use native_table::NativeTable;
+use native_table::{NativeTable, TableMemoryLayoutStats};
 
 /// Mask covering all TM flags — any bit set to 1 represents a cacheable TM.
 /// With u32, we cover all 26 TmKind values (bits 0-25).
@@ -99,6 +99,10 @@ impl LuaRawTable {
     #[inline]
     pub fn compute_mem_size(&self) -> usize {
         self.impl_table.compute_mem_size()
+    }
+
+    pub fn memory_layout_stats(&self) -> TableMemoryLayoutStats {
+        self.impl_table.memory_layout_stats()
     }
 
     pub fn is_array(&self) -> bool {

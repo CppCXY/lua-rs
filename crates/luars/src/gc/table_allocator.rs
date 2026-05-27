@@ -6,9 +6,19 @@ use std::rc::Rc;
 
 const MAX_POOLED_HASH_NODES: usize = 64;
 const MAX_POOLED_ARRAY_BYTES: usize = 64 * 1024;
+const MAX_HASH_BLOCKS_PER_KEY: usize = 256;
+const MAX_ARRAY_BLOCKS_PER_KEY: usize = 16;
 
 type HashPoolKey = (usize, usize, usize);
 type ArrayPoolKey = (usize, usize);
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TableAllocatorStats {
+    pub hash_cached_blocks: usize,
+    pub hash_cached_bytes: usize,
+    pub array_cached_blocks: usize,
+    pub array_cached_bytes: usize,
+}
 
 #[derive(Default)]
 struct TableAllocInner {
@@ -42,6 +52,31 @@ pub struct TableAllocHandle {
 }
 
 impl TableAllocHandle {
+    pub fn stats(&self) -> TableAllocatorStats {
+        let inner = self.inner.borrow();
+
+        let mut hash_cached_blocks = 0;
+        let mut hash_cached_bytes = 0;
+        for ((count, elem_size, _elem_align), free_list) in &inner.hash_free_lists {
+            hash_cached_blocks += free_list.len();
+            hash_cached_bytes += free_list.len() * count * elem_size;
+        }
+
+        let mut array_cached_blocks = 0;
+        let mut array_cached_bytes = 0;
+        for ((total_size, _align), free_list) in &inner.array_free_lists {
+            array_cached_blocks += free_list.len();
+            array_cached_bytes += free_list.len() * total_size;
+        }
+
+        TableAllocatorStats {
+            hash_cached_blocks,
+            hash_cached_bytes,
+            array_cached_blocks,
+            array_cached_bytes,
+        }
+    }
+
     #[inline(always)]
     pub fn alloc_hash_nodes<T>(&self, size: usize) -> *mut T {
         if size <= MAX_POOLED_HASH_NODES {
@@ -72,13 +107,12 @@ impl TableAllocHandle {
 
         if size <= MAX_POOLED_HASH_NODES {
             let key = (size, std::mem::size_of::<T>(), std::mem::align_of::<T>());
-            self.inner
-                .borrow_mut()
-                .hash_free_lists
-                .entry(key)
-                .or_default()
-                .push(ptr as usize);
-            return;
+            let mut inner = self.inner.borrow_mut();
+            let free_list = inner.hash_free_lists.entry(key).or_default();
+            if free_list.len() < MAX_HASH_BLOCKS_PER_KEY {
+                free_list.push(ptr as usize);
+                return;
+            }
         }
 
         let layout = Layout::array::<T>(size).unwrap();
@@ -115,16 +149,75 @@ impl TableAllocHandle {
 
         if total_size <= MAX_POOLED_ARRAY_BYTES {
             let key = (total_size, align);
-            self.inner
-                .borrow_mut()
-                .array_free_lists
-                .entry(key)
-                .or_default()
-                .push(ptr as usize);
-            return;
+            let mut inner = self.inner.borrow_mut();
+            let free_list = inner.array_free_lists.entry(key).or_default();
+            if free_list.len() < MAX_ARRAY_BLOCKS_PER_KEY {
+                free_list.push(ptr as usize);
+                return;
+            }
         }
 
         let layout = Layout::from_size_align(total_size, align).unwrap();
         unsafe { alloc::dealloc(ptr, layout) };
+    }
+
+    pub fn clear_cached_blocks(&self) {
+        let mut inner = self.inner.borrow_mut();
+
+        for ((count, elem_size, elem_align), free_list) in inner.hash_free_lists.drain() {
+            let layout = Layout::from_size_align(count * elem_size, elem_align)
+                .expect("valid pooled hash layout");
+            for addr in free_list {
+                unsafe { alloc::dealloc(addr as *mut u8, layout) };
+            }
+        }
+
+        for ((total_size, align), free_list) in inner.array_free_lists.drain() {
+            let layout =
+                Layout::from_size_align(total_size, align).expect("valid pooled array layout");
+            for addr in free_list {
+                unsafe { alloc::dealloc(addr as *mut u8, layout) };
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_ARRAY_BLOCKS_PER_KEY, MAX_HASH_BLOCKS_PER_KEY, TableAllocHandle};
+
+    #[test]
+    fn hash_cache_respects_per_key_limit() {
+        let alloc = TableAllocHandle::default();
+        let mut ptrs = Vec::new();
+        for _ in 0..(MAX_HASH_BLOCKS_PER_KEY + 10) {
+            let ptr = alloc.alloc_hash_nodes::<u32>(4);
+            ptrs.push(ptr);
+        }
+        for ptr in ptrs {
+            alloc.free_hash_nodes(ptr, 4);
+        }
+
+        let stats = alloc.stats();
+        assert_eq!(MAX_HASH_BLOCKS_PER_KEY, stats.hash_cached_blocks);
+    }
+
+    #[test]
+    fn clear_cached_blocks_empties_free_lists() {
+        let alloc = TableAllocHandle::default();
+        for _ in 0..4 {
+            let ptr = alloc.alloc_hash_nodes::<u32>(4);
+            alloc.free_hash_nodes(ptr, 4);
+        }
+        for _ in 0..(MAX_ARRAY_BLOCKS_PER_KEY + 2) {
+            let ptr = alloc.alloc_array_bytes(128, 8);
+            alloc.free_array_bytes(ptr, 128, 8);
+        }
+
+        alloc.clear_cached_blocks();
+
+        let stats = alloc.stats();
+        assert_eq!(0, stats.hash_cached_blocks);
+        assert_eq!(0, stats.array_cached_blocks);
     }
 }

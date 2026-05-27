@@ -42,6 +42,7 @@ mod string_interner;
 mod table_allocator;
 
 use std::collections::HashSet;
+use std::fmt::Write;
 
 use crate::{
     LuaRawTable, LuaResult,
@@ -342,6 +343,32 @@ pub struct GcStats {
     pub young_gen_size: usize,
     pub old_gen_size: usize,
     pub promoted_objects: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct KindTotals {
+    count: usize,
+    bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TableLayoutTotals {
+    count: usize,
+    array_capacity_elems: usize,
+    array_live_elems: usize,
+    array_capacity_bytes: usize,
+    array_live_bytes: usize,
+    hash_capacity_nodes: usize,
+    hash_live_nodes: usize,
+    hash_capacity_bytes: usize,
+    hash_live_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct GcListSnapshot {
+    len: usize,
+    capacity: usize,
+    live_bytes: usize,
 }
 
 impl GC {
@@ -729,6 +756,163 @@ impl GC {
     /// Get current GC statistics
     pub fn stats(&self) -> &GcStats {
         &self.stats
+    }
+
+    pub fn real_bytes(&self) -> isize {
+        self.get_total_bytes()
+    }
+
+    fn snapshot_list(list: &GcList) -> GcListSnapshot {
+        let live_bytes = list.iter().map(GcObjectOwner::size).sum::<usize>();
+        GcListSnapshot {
+            len: list.len(),
+            capacity: list.capacity(),
+            live_bytes,
+        }
+    }
+
+    fn accumulate_kind_totals(kind_totals: &mut [KindTotals; 9], list: &GcList) {
+        for owner in list.iter() {
+            let kind_index = match owner {
+                GcObjectOwner::String(_) => 0,
+                GcObjectOwner::Table(_) => 1,
+                GcObjectOwner::Function(_) => 2,
+                GcObjectOwner::Upvalue(_) => 3,
+                GcObjectOwner::Thread(_) => 4,
+                GcObjectOwner::Userdata(_) => 5,
+                GcObjectOwner::CClosure(_) => 6,
+                GcObjectOwner::RClosure(_) => 7,
+                GcObjectOwner::Proto(_) => 8,
+            };
+            kind_totals[kind_index].count += 1;
+            kind_totals[kind_index].bytes += owner.size();
+        }
+    }
+
+    fn accumulate_table_layout_totals(table_totals: &mut TableLayoutTotals, list: &GcList) {
+        for owner in list.iter() {
+            if let GcObjectOwner::Table(table) = owner {
+                let stats = table.as_ref().data.memory_layout_stats();
+                table_totals.count += 1;
+                table_totals.array_capacity_elems += stats.array_capacity_elems;
+                table_totals.array_live_elems += stats.array_live_elems;
+                table_totals.array_capacity_bytes += stats.array_capacity_bytes;
+                table_totals.array_live_bytes += stats.array_live_bytes;
+                table_totals.hash_capacity_nodes += stats.hash_capacity_nodes;
+                table_totals.hash_live_nodes += stats.hash_live_nodes;
+                table_totals.hash_capacity_bytes += stats.hash_capacity_bytes;
+                table_totals.hash_live_bytes += stats.hash_live_bytes;
+            }
+        }
+    }
+
+    pub fn memory_breakdown(&self) -> String {
+        let allgc = Self::snapshot_list(&self.allgc);
+        let survival = Self::snapshot_list(&self.survival);
+        let old1 = Self::snapshot_list(&self.old1);
+        let old = Self::snapshot_list(&self.old);
+        let fixed = Self::snapshot_list(&self.fixed_list);
+
+        let owner_vec_bytes = (allgc.capacity
+            + survival.capacity
+            + old1.capacity
+            + old.capacity
+            + fixed.capacity)
+            * std::mem::size_of::<GcObjectOwner>();
+
+        let mut kind_totals = [KindTotals::default(); 9];
+        Self::accumulate_kind_totals(&mut kind_totals, &self.allgc);
+        Self::accumulate_kind_totals(&mut kind_totals, &self.survival);
+        Self::accumulate_kind_totals(&mut kind_totals, &self.old1);
+        Self::accumulate_kind_totals(&mut kind_totals, &self.old);
+        Self::accumulate_kind_totals(&mut kind_totals, &self.fixed_list);
+
+        let mut table_totals = TableLayoutTotals::default();
+        Self::accumulate_table_layout_totals(&mut table_totals, &self.allgc);
+        Self::accumulate_table_layout_totals(&mut table_totals, &self.survival);
+        Self::accumulate_table_layout_totals(&mut table_totals, &self.old1);
+        Self::accumulate_table_layout_totals(&mut table_totals, &self.old);
+        Self::accumulate_table_layout_totals(&mut table_totals, &self.fixed_list);
+
+        let mut out = String::new();
+        let _ = writeln!(out, "GC Breakdown:");
+        let _ = writeln!(out, "  real_bytes={}", self.real_bytes());
+        let _ = writeln!(out, "  gc_debt={}", self.gc_debt);
+        let _ = writeln!(out, "  total_bytes={}", self.total_bytes);
+        let _ = writeln!(out, "  owner_vec_bytes={}", owner_vec_bytes);
+        let _ = writeln!(
+            out,
+            "  gray_lists_bytes={}",
+            self.gray.capacity() * std::mem::size_of::<GcObjectPtr>()
+                + self.grayagain.capacity() * std::mem::size_of::<GcObjectPtr>()
+                + self.finobj.capacity() * std::mem::size_of::<GcObjectPtr>()
+                + self.tobefnz.capacity() * std::mem::size_of::<GcObjectPtr>()
+                + self.weak.capacity() * std::mem::size_of::<TablePtr>()
+                + self.ephemeron.capacity() * std::mem::size_of::<TablePtr>()
+                + self.allweak.capacity() * std::mem::size_of::<TablePtr>()
+                + self.twups.capacity() * std::mem::size_of::<ThreadPtr>()
+        );
+        let _ = writeln!(out, "  lists:");
+        for (name, snap) in [
+            ("allgc", allgc),
+            ("survival", survival),
+            ("old1", old1),
+            ("old", old),
+            ("fixed", fixed),
+        ] {
+            let _ = writeln!(
+                out,
+                "    {}: len={} cap={} live_bytes={} vec_bytes={}",
+                name,
+                snap.len,
+                snap.capacity,
+                snap.live_bytes,
+                snap.capacity * std::mem::size_of::<GcObjectOwner>()
+            );
+        }
+        let _ = writeln!(out, "  kinds:");
+        for (name, totals) in [
+            ("string", kind_totals[0]),
+            ("table", kind_totals[1]),
+            ("function", kind_totals[2]),
+            ("upvalue", kind_totals[3]),
+            ("thread", kind_totals[4]),
+            ("userdata", kind_totals[5]),
+            ("cclosure", kind_totals[6]),
+            ("rclosure", kind_totals[7]),
+            ("proto", kind_totals[8]),
+        ] {
+            let _ = writeln!(out, "    {}: count={} bytes={}", name, totals.count, totals.bytes);
+        }
+        let _ = writeln!(out, "  table_layout:");
+        let _ = writeln!(
+            out,
+            "    tables={}",
+            table_totals.count
+        );
+        let _ = writeln!(
+            out,
+            "    array: live_elems={} capacity_elems={} live_bytes={} capacity_bytes={} slack_bytes={}",
+            table_totals.array_live_elems,
+            table_totals.array_capacity_elems,
+            table_totals.array_live_bytes,
+            table_totals.array_capacity_bytes,
+            table_totals
+                .array_capacity_bytes
+                .saturating_sub(table_totals.array_live_bytes)
+        );
+        let _ = writeln!(
+            out,
+            "    hash: live_nodes={} capacity_nodes={} live_bytes={} capacity_bytes={} slack_bytes={}",
+            table_totals.hash_live_nodes,
+            table_totals.hash_capacity_nodes,
+            table_totals.hash_live_bytes,
+            table_totals.hash_capacity_bytes,
+            table_totals
+                .hash_capacity_bytes
+                .saturating_sub(table_totals.hash_live_bytes)
+        );
+        out
     }
 
     /// Enter finalizer execution mode - temporarily stop GC to prevent

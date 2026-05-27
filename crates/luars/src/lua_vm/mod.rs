@@ -1,6 +1,7 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
 use std::ffi::c_void;
+use std::fmt::Write;
 use std::ptr::null_mut;
 
 pub mod async_thread;
@@ -1308,6 +1309,7 @@ impl GlobalState {
             }
         }
 
+        self.object_allocator.trim_after_full_gc();
         self.gc.gc_emergency = false;
     }
 
@@ -1367,6 +1369,57 @@ impl GlobalState {
             stats.old_gen_size,
             stats.promoted_objects
         )
+    }
+
+    pub fn gc_breakdown(&self) -> String {
+        let allocator = self.object_allocator.breakdown();
+        let mut out = self.gc.memory_breakdown();
+        let _ = writeln!(out, "Allocator Breakdown:");
+        let _ = writeln!(
+            out,
+            "  string_interner: used={} dead={} capacity={} bytes={}",
+            allocator.string_interner_used,
+            allocator.string_interner_dead,
+            allocator.string_interner_capacity,
+            allocator.string_interner_bytes
+        );
+        let _ = writeln!(
+            out,
+            "  paged_pools: bytes={} pages={} total_slots={} live_slots={} free_slots={}",
+            allocator.string_pool_bytes
+                + allocator.table_pool_bytes
+                + allocator.function_pool_bytes
+                + allocator.cclosure_pool_bytes
+                + allocator.rclosure_pool_bytes
+                + allocator.upvalue_pool_bytes
+                + allocator.userdata_pool_bytes
+                + allocator.proto_pool_bytes,
+            allocator.pool_page_count,
+            allocator.pool_total_slots,
+            allocator.pool_live_slots,
+            allocator.pool_free_slots
+        );
+        let _ = writeln!(
+            out,
+            "    string_pool={} table_pool={} function_pool={} cclosure_pool={} rclosure_pool={} upvalue_pool={} userdata_pool={} proto_pool={}",
+            allocator.string_pool_bytes,
+            allocator.table_pool_bytes,
+            allocator.function_pool_bytes,
+            allocator.cclosure_pool_bytes,
+            allocator.rclosure_pool_bytes,
+            allocator.upvalue_pool_bytes,
+            allocator.userdata_pool_bytes,
+            allocator.proto_pool_bytes
+        );
+        let _ = writeln!(
+            out,
+            "  table_allocator_cache: hash_blocks={} hash_bytes={} array_blocks={} array_bytes={}",
+            allocator.table_cached_hash_blocks,
+            allocator.table_cached_hash_bytes,
+            allocator.table_cached_array_blocks,
+            allocator.table_cached_array_bytes
+        );
+        out
     }
 
     pub(crate) fn get_main_thread_ptr(&self) -> ThreadPtr {
