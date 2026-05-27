@@ -2105,7 +2105,7 @@ mod tests {
     #[cfg(feature = "shared-proto")]
     use crate::gc::share_lua_value;
     #[cfg(feature = "shared-proto")]
-    use crate::gc::{GC, StringInterner};
+    use crate::gc::{GC, GcString, PagedPool, StringInterner};
     #[cfg(feature = "shared-proto")]
     use crate::lua_vm::SafeOption;
 
@@ -2194,11 +2194,17 @@ mod tests {
         let key = "0123456789abcdefghijklmnopqr";
         let mut shared_interner = StringInterner::new();
         let mut local_interner = StringInterner::new();
+        let mut shared_pool = PagedPool::<GcString>::default();
+        let mut local_pool = PagedPool::<GcString>::default();
         let mut shared_gc = GC::new(SafeOption::default());
         let mut local_gc = GC::new(SafeOption::default());
 
-        let mut shared_key = shared_interner.intern(key, &mut shared_gc).unwrap();
-        let local_key = local_interner.intern(key, &mut local_gc).unwrap();
+        let mut shared_key = shared_interner
+            .intern(key, &mut shared_gc, &mut shared_pool)
+            .unwrap();
+        let local_key = local_interner
+            .intern(key, &mut local_gc, &mut local_pool)
+            .unwrap();
         let value = LuaValue::integer(123);
 
         assert!(share_lua_value(&mut shared_key));
@@ -2215,11 +2221,17 @@ mod tests {
         let key = "PTYPE";
         let mut shared_interner = StringInterner::new();
         let mut local_interner = StringInterner::new();
+        let mut shared_pool = PagedPool::<GcString>::default();
+        let mut local_pool = PagedPool::<GcString>::default();
         let mut shared_gc = GC::new(SafeOption::default());
         let mut local_gc = GC::new(SafeOption::default());
 
-        let mut shared_key = shared_interner.intern(key, &mut shared_gc).unwrap();
-        let local_key = local_interner.intern(key, &mut local_gc).unwrap();
+        let mut shared_key = shared_interner
+            .intern(key, &mut shared_gc, &mut shared_pool)
+            .unwrap();
+        let local_key = local_interner
+            .intern(key, &mut local_gc, &mut local_pool)
+            .unwrap();
 
         assert!(share_lua_value(&mut shared_key));
 

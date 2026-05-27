@@ -1465,17 +1465,23 @@ mod tests {
     #[test]
     fn test_shared_short_string_equals_local_short_string() {
         use crate::gc::share_lua_value;
-        use crate::gc::{GC, StringInterner};
+        use crate::gc::{GC, GcString, PagedPool, StringInterner};
         use crate::lua_vm::SafeOption;
 
         let key = "0123456789abcdefghijklmnopqr";
         let mut left_interner = StringInterner::new();
         let mut right_interner = StringInterner::new();
+        let mut left_pool = PagedPool::<GcString>::default();
+        let mut right_pool = PagedPool::<GcString>::default();
         let mut left_gc = GC::new(SafeOption::default());
         let mut right_gc = GC::new(SafeOption::default());
 
-        let mut shared_value = left_interner.intern(key, &mut left_gc).unwrap();
-        let local_value = right_interner.intern(key, &mut right_gc).unwrap();
+        let mut shared_value = left_interner
+            .intern(key, &mut left_gc, &mut left_pool)
+            .unwrap();
+        let local_value = right_interner
+            .intern(key, &mut right_gc, &mut right_pool)
+            .unwrap();
 
         assert!(share_lua_value(&mut shared_value));
         assert_eq!(shared_value, local_value);
