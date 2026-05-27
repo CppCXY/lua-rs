@@ -31,6 +31,8 @@ impl LuaString {
         self.inner.byte_len()
     }
 
+    /// # Safety
+    /// The returned `LuaValue` must not be used after the `LuaString` is dropped.
     pub unsafe fn to_value(&self) -> LuaValue {
         self.inner.to_value()
     }

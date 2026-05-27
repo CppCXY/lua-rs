@@ -284,36 +284,54 @@ impl LuaTableRef {
         let vm = self.inner.global_state_mut();
         let table = self.inner.to_value();
         let key_val = vm.create_string(key)?;
-        Ok(vm.raw_get(&table, &key_val).unwrap_or_default())
+        Ok(vm
+            .main_state()
+            .table_get(&table, &key_val)?
+            .unwrap_or(LuaValue::nil()))
     }
 
     /// Get a value by integer key.
     pub fn geti(&self, key: i64) -> LuaResult<LuaValue> {
-        let vm = self.inner.global_state();
+        let vm = self.inner.global_state_mut();
         let table = self.inner.to_value();
-        Ok(vm.raw_geti(&table, key).unwrap_or_default())
+        vm.main_state().table_geti(&table, key)
     }
 
     /// Get a value by arbitrary LuaValue key.
     pub fn get_value(&self, key: &LuaValue) -> LuaResult<LuaValue> {
-        let vm = self.inner.global_state();
+        let vm = self.inner.global_state_mut();
         let table = self.inner.to_value();
-        Ok(vm.raw_get(&table, key).unwrap_or_default())
+        Ok(vm
+            .main_state()
+            .table_get(&table, key)?
+            .unwrap_or(LuaValue::nil()))
     }
 
     /// Get a value by string key and convert to a Rust type via `FromLua`.
-    pub fn get_as<T: crate::FromLua>(&self, key: &str) -> LuaResult<T> {
+    pub fn get_as<T: FromLua>(&self, key: &str) -> LuaResult<T> {
         let val = self.get(key)?;
         let vm = self.inner.global_state_mut();
         T::from_lua(val, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
+    pub fn set_typed<K: IntoLua, V: IntoLua>(&self, key: K, value: V) -> LuaResult<()> {
+        let vm = self.inner.global_state_mut();
+        let key = collect_single_value(vm, key, "LuaTableRef::set_typed(key)")?;
+        let value = collect_single_value(vm, value, "LuaTableRef::set_typed(value)")?;
+        let table = self.inner.to_value();
+        vm.main_state().table_set(&table, key, value)?;
+        Ok(())
+    }
+
     /// Get a value by arbitrary Rust-convertible key and convert it to `T`.
-    pub fn get_typed<K: IntoLua, T: crate::FromLua>(&self, key: K) -> LuaResult<T> {
+    pub fn get_typed<K: IntoLua, T: FromLua>(&self, key: K) -> LuaResult<T> {
         let vm = self.inner.global_state_mut();
         let key = collect_single_value(vm, key, "LuaTableRef::get_typed(key)")?;
         let table = self.inner.to_value();
-        let value = vm.raw_get(&table, &key).unwrap_or_default();
+        let value = vm
+            .main_state()
+            .table_get(&table, &key)?
+            .unwrap_or(LuaValue::nil());
         T::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
@@ -368,7 +386,7 @@ impl LuaTableRef {
         let vm = self.inner.global_state_mut();
         let table = self.inner.to_value();
         let key_val = vm.create_string(key)?;
-        vm.raw_set(&table, key_val, value);
+        vm.main_state().table_set(&table, key_val, value)?;
         Ok(())
     }
 
@@ -376,7 +394,7 @@ impl LuaTableRef {
     pub fn seti(&self, key: i64, value: LuaValue) -> LuaResult<()> {
         let vm = self.inner.global_state_mut();
         let table = self.inner.to_value();
-        vm.raw_seti(&table, key, value);
+        vm.main_state().table_seti(&table, key, value)?;
         Ok(())
     }
 
@@ -389,13 +407,36 @@ impl LuaTableRef {
     }
 
     /// Set an arbitrary key-value pair from Rust-convertible values.
-    pub fn set_typed<K: IntoLua, V: IntoLua>(&self, key: K, value: V) -> LuaResult<()> {
+    pub fn rawset_typed<K: IntoLua, V: IntoLua>(&self, key: K, value: V) -> LuaResult<()> {
         let vm = self.inner.global_state_mut();
-        let key = collect_single_value(vm, key, "LuaTableRef::set_typed(key)")?;
-        let value = collect_single_value(vm, value, "LuaTableRef::set_typed(value)")?;
+        let key = collect_single_value(vm, key, "LuaTableRef::rawset_typed(key)")?;
+        let value = collect_single_value(vm, value, "LuaTableRef::rawset_typed(value)")?;
         let table = self.inner.to_value();
         vm.raw_set(&table, key, value);
         Ok(())
+    }
+
+    pub fn rawget_typed<K: IntoLua, V: FromLua>(&self, key: K) -> LuaResult<V> {
+        let vm = self.inner.global_state_mut();
+        let key = collect_single_value(vm, key, "LuaTableRef::rawget_typed(key)")?;
+        let table = self.inner.to_value();
+        let value = vm.raw_get(&table, &key).unwrap_or_default();
+        V::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
+    }
+
+    pub fn rawseti_typed<V: IntoLua>(&self, key: i64, value: V) -> LuaResult<()> {
+        let vm = self.inner.global_state_mut();
+        let value = collect_single_value(vm, value, "LuaTableRef::rawseti_typed(value)")?;
+        let table = self.inner.to_value();
+        vm.raw_seti(&table, key, value);
+        Ok(())
+    }
+
+    pub fn rawgeti_typed<V: FromLua>(&self, key: i64) -> LuaResult<V> {
+        let vm = self.inner.global_state_mut();
+        let table = self.inner.to_value();
+        let value = vm.raw_geti(&table, key).unwrap_or_default();
+        V::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     // ==================== Iteration ====================

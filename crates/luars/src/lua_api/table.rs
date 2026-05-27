@@ -83,13 +83,23 @@ impl LuaTable {
     /// Get a field without metamethods.
     #[inline]
     pub fn raw_get<T: FromLua>(&self, key: impl IntoLua) -> LuaResult<T> {
-        self.inner.get_typed(key)
+        self.inner.rawget_typed(key)
     }
 
     /// Set a field without metamethods.
     #[inline]
     pub fn raw_set(&self, key: impl IntoLua, value: impl IntoLua) -> LuaResult<()> {
-        self.inner.set_typed(key, value)
+        self.inner.rawset_typed(key, value)
+    }
+
+    #[inline]
+    pub fn raw_seti(&self, idx: i64, value: impl IntoLua) -> LuaResult<()> {
+        self.inner.rawseti_typed(idx, value)
+    }
+
+    #[inline]
+    pub fn raw_geti<T: FromLua>(&self, idx: i64) -> LuaResult<T> {
+        self.inner.rawgeti_typed(idx)
     }
 
     /// Return the array length (`#t`).
@@ -190,6 +200,8 @@ impl LuaTable {
         self.inner.to_value()
     }
 
+    /// # Safety
+    /// The returned `LuaValue` must not be used after the `LuaTable` is dropped.
     pub unsafe fn to_value(&self) -> LuaValue {
         self.inner.to_value()
     }

@@ -107,6 +107,7 @@ pub(crate) trait StackValueApi {
     fn collect_values<T: IntoLua>(&mut self, value: T, api_name: &str) -> LuaResult<Vec<LuaValue>>;
     fn collect_single_value<T: IntoLua>(&mut self, value: T, api_name: &str)
     -> LuaResult<LuaValue>;
+    #[allow(clippy::wrong_self_convention)]
     fn from_value<T: FromLua>(&mut self, value: LuaValue, api_name: &str) -> LuaResult<T>;
 }
 
