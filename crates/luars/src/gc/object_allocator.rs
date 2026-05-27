@@ -8,7 +8,7 @@ use crate::{
     LuaRawFunction, LuaRawTable, LuaResult, LuaValue,
     gc::{
         GC, GcCClosure, GcFunction, GcObjectOwner, GcProto, GcRClosure, GcTable, GcThread,
-        GcUpvalue, GcUserdata, ProtoPtr, StringPtr, UpvaluePtr,
+        GcUpvalue, GcUserdata, PagedPool, ProtoPtr, StringPtr, TableAllocHandle, UpvaluePtr,
     },
 };
 
@@ -16,6 +16,8 @@ pub type CreateResult = LuaResult<LuaValue>;
 
 pub struct ObjectAllocator {
     strings: StringInterner, // Private - use create_string() to intern
+    table_pool: PagedPool<GcTable>,
+    table_allocator: TableAllocHandle,
 }
 
 impl Default for ObjectAllocator {
@@ -28,6 +30,8 @@ impl ObjectAllocator {
     pub fn new() -> Self {
         Self {
             strings: StringInterner::new(),
+            table_pool: PagedPool::default(),
+            table_allocator: TableAllocHandle::default(),
         }
     }
 
@@ -93,8 +97,12 @@ impl ObjectAllocator {
             0
         };
         let size = (base_size + array_bytes + hash_bytes) as u32;
-        let ptr = Box::new(GcTable::new(
-            LuaRawTable::new(array_size as u32, hash_size as u32),
+        let ptr = self.table_pool.alloc(GcTable::new(
+            LuaRawTable::new(
+                array_size as u32,
+                hash_size as u32,
+                self.table_allocator.clone(),
+            ),
             current_white,
             size,
         ));

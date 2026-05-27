@@ -6,7 +6,7 @@ use crate::lua_value::{
     lua_value::{LUA_TNIL, LUA_VEMPTY, LUA_VNIL, LUA_VNUMINT, LUA_VSHRSTR, Value, novariant},
     short_string_ptr_eq,
 };
-use crate::{gc::GcString, gc::StringPtr};
+use crate::{gc::{GcString, StringPtr, TableAllocHandle},};
 
 use std::alloc::{self, Layout};
 use std::ptr;
@@ -104,17 +104,19 @@ pub struct NativeTable {
     /// Last free position in hash table (optimization like Lua 5.5)
     /// Points to next candidate for free slot search
     lastfree: *mut Node,
+    hash_allocator: TableAllocHandle,
 }
 
 impl NativeTable {
     /// Create new table with given capacity
-    pub fn new(array_cap: u32, hash_cap: u32) -> Self {
+    pub fn new(array_cap: u32, hash_cap: u32, allocator: TableAllocHandle) -> Self {
         let mut table = Self {
             array: ptr::null_mut(),
             asize: 0,
             node: ptr::null_mut(),
             lsizenode: 0,
             lastfree: ptr::null_mut(),
+            hash_allocator: allocator,
         };
 
         if array_cap > 0 {
@@ -157,8 +159,7 @@ impl NativeTable {
         debug_assert_eq!(self.lsizenode, 0);
 
         let new_size = 1usize << new_lsize;
-        let layout = Layout::array::<Node>(new_size).unwrap();
-        let new_node = unsafe { alloc::alloc_zeroed(layout) as *mut Node };
+        let new_node = self.hash_allocator.alloc_hash_nodes::<Node>(new_size);
         if new_node.is_null() {
             panic!("Failed to allocate hash nodes");
         }
@@ -826,15 +827,13 @@ impl NativeTable {
                         }
                     }
                 }
-                let old_layout = Layout::array::<Node>(old_size).unwrap();
-                unsafe { alloc::dealloc(old_node as *mut u8, old_layout) };
+                self.hash_allocator.free_hash_nodes(old_node, old_size);
             }
             return Self::hash_mem_bytes(0) - old_bytes + extra_delta;
         }
 
         // Allocate new hash array — zeroed, since Node{nil,nil,0} is all-zero bytes
-        let layout = Layout::array::<Node>(new_size).unwrap();
-        let new_node = unsafe { alloc::alloc_zeroed(layout) as *mut Node };
+        let new_node = self.hash_allocator.alloc_hash_nodes::<Node>(new_size);
         if new_node.is_null() {
             panic!("Failed to allocate hash nodes");
         }
@@ -885,8 +884,7 @@ impl NativeTable {
                 }
             }
 
-            let old_layout = Layout::array::<Node>(old_size).unwrap();
-            unsafe { alloc::dealloc(old_node as *mut u8, old_layout) };
+            self.hash_allocator.free_hash_nodes(old_node, old_size);
         }
         Self::hash_mem_bytes(self.sizenode()) - old_bytes + extra_delta
     }
@@ -2088,8 +2086,7 @@ impl Drop for NativeTable {
         // Free hash
         let size = self.sizenode();
         if size > 0 && !self.is_dummy() {
-            let layout = Layout::array::<Node>(size).unwrap();
-            unsafe { alloc::dealloc(self.node as *mut u8, layout) };
+            self.hash_allocator.free_hash_nodes(self.node, size);
         }
     }
 }
@@ -2107,7 +2104,7 @@ mod tests {
 
     #[test]
     fn test_native_table_basic() {
-        let mut t = NativeTable::new(4, 4);
+        let mut t = NativeTable::new(4, 4, TableAllocHandle::default());
 
         // Test integer keys
         let key1 = LuaValue::integer(1);
@@ -2128,7 +2125,7 @@ mod tests {
 
     #[test]
     fn test_array_part() {
-        let mut t = NativeTable::new(10, 0);
+        let mut t = NativeTable::new(10, 0, TableAllocHandle::default());
 
         for i in 1..=10 {
             t.set_int(i, LuaValue::integer(i * 10));
@@ -2143,7 +2140,7 @@ mod tests {
 
     #[test]
     fn test_hash_collisions() {
-        let mut t = NativeTable::new(0, 4);
+        let mut t = NativeTable::new(0, 4, TableAllocHandle::default());
 
         // Add many items to force collisions
         for i in 0..20 {
@@ -2164,7 +2161,7 @@ mod tests {
     fn test_performance_integer_keys() {
         use std::time::Instant;
 
-        let mut t = NativeTable::new(100, 100);
+        let mut t = NativeTable::new(100, 100, TableAllocHandle::default());
 
         let start = Instant::now();
 
@@ -2199,7 +2196,7 @@ mod tests {
 
         assert!(share_lua_value(&mut shared_key));
 
-        let mut table = NativeTable::new(0, 4);
+        let mut table = NativeTable::new(0, 4, TableAllocHandle::default());
         table.raw_set(&shared_key, value);
 
         assert_eq!(table.raw_get(&local_key), Some(value));
@@ -2219,7 +2216,7 @@ mod tests {
 
         assert!(share_lua_value(&mut shared_key));
 
-        let mut table = NativeTable::new(0, 4);
+        let mut table = NativeTable::new(0, 4, TableAllocHandle::default());
         table.raw_set(&shared_key, LuaValue::integer(1));
 
         let result = table.pset_shortstr(&local_key, LuaValue::integer(3));

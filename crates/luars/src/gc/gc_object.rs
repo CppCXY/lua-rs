@@ -1,6 +1,6 @@
 use crate::{
     LuaProto, LuaRawFunction, LuaRawTable,
-    gc::GcObjectKind,
+    gc::{GcObjectKind, Pooled},
     lua_value::{CClosureFunction, LuaString, LuaUpvalue, LuaUserdata, RClosureFunction},
     lua_vm::LuaState,
 };
@@ -728,7 +728,7 @@ impl From<ProtoPtr> for GcObjectPtr {
 // ============ GC-managed Objects ============
 pub enum GcObjectOwner {
     String(Box<GcString>),
-    Table(Box<GcTable>),
+    Table(Pooled<GcTable>),
     Function(Box<GcFunction>),
     Upvalue(Box<GcUpvalue>),
     Thread(Box<GcThread>),
@@ -749,7 +749,7 @@ impl GcObjectOwner {
     fn raw_header_ptr(&self) -> *mut GcHeader {
         match self {
             GcObjectOwner::String(s) => Self::box_raw_ptr(s) as *mut GcHeader,
-            GcObjectOwner::Table(t) => Self::box_raw_ptr(t) as *mut GcHeader,
+            GcObjectOwner::Table(t) => t.as_ptr() as *mut GcHeader,
             GcObjectOwner::Function(f) => Self::box_raw_ptr(f) as *mut GcHeader,
             GcObjectOwner::CClosure(c) => Self::box_raw_ptr(c) as *mut GcHeader,
             GcObjectOwner::RClosure(r) => Self::box_raw_ptr(r) as *mut GcHeader,
@@ -789,7 +789,7 @@ impl GcObjectOwner {
 
     pub fn as_table_ptr(&self) -> Option<TablePtr> {
         match self {
-            GcObjectOwner::Table(t) => Some(TablePtr::new(Self::box_raw_ptr(t))),
+            GcObjectOwner::Table(t) => Some(TablePtr::new(t.as_ptr())),
             _ => None,
         }
     }
@@ -846,7 +846,7 @@ impl GcObjectOwner {
     pub fn as_gc_ptr(&self) -> GcObjectPtr {
         match self {
             GcObjectOwner::String(s) => GcObjectPtr::from(StringPtr::new(Self::box_raw_ptr(s))),
-            GcObjectOwner::Table(t) => GcObjectPtr::from(TablePtr::new(Self::box_raw_ptr(t))),
+            GcObjectOwner::Table(t) => GcObjectPtr::from(TablePtr::new(t.as_ptr())),
             GcObjectOwner::Function(f) => GcObjectPtr::from(FunctionPtr::new(Self::box_raw_ptr(f))),
             GcObjectOwner::Upvalue(u) => GcObjectPtr::from(UpvaluePtr::new(Self::box_raw_ptr(u))),
             GcObjectOwner::Thread(t) => GcObjectPtr::from(ThreadPtr::new(Self::box_raw_ptr(t))),
