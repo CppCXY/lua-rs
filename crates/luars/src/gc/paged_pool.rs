@@ -72,36 +72,38 @@ impl<T> PagedPool<T> {
     pub fn alloc(&mut self, value: T) -> Pooled<T> {
         #[cfg(miri)]
         {
-            return Pooled::boxed(value);
+            Pooled::boxed(value)
         }
 
         #[cfg(not(miri))]
-        let slot = {
-            let mut inner = self.inner.borrow_mut();
-            if inner.free_slots.is_empty() {
-                inner.grow();
+        {
+            let slot = {
+                let mut inner = self.inner.borrow_mut();
+                if inner.free_slots.is_empty() {
+                    inner.grow();
+                }
+
+                let slot = inner
+                    .free_slots
+                    .pop()
+                    .expect("paged pool must provide a free slot after grow");
+
+                unsafe {
+                    let slot_ref = &mut *slot.as_ptr();
+                    debug_assert!(!slot_ref.occupied, "paged pool slot already occupied");
+                    slot_ref.occupied = true;
+                    slot_ref.value_mut_ptr().write(value);
+                }
+
+                slot
+            };
+
+            Pooled {
+                repr: PooledRepr::Slot {
+                    slot,
+                    pool: Rc::clone(&self.inner),
+                },
             }
-
-            let slot = inner
-                .free_slots
-                .pop()
-                .expect("paged pool must provide a free slot after grow");
-
-            unsafe {
-                let slot_ref = &mut *slot.as_ptr();
-                debug_assert!(!slot_ref.occupied, "paged pool slot already occupied");
-                slot_ref.occupied = true;
-                slot_ref.value_mut_ptr().write(value);
-            }
-
-            slot
-        };
-
-        Pooled {
-            repr: PooledRepr::Slot {
-                slot,
-                pool: Rc::clone(&self.inner),
-            },
         }
     }
 }
