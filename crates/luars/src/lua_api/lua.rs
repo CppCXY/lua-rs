@@ -665,6 +665,7 @@ impl LuaSandboxApi for Lua {
     ) -> LuaResult<()> {
         let value = self
             .global_state_owner
+            .main_state()
             .collect_single_value(value, "sandbox_insert_global")?;
         config.insert_global(name, value);
         Ok(())

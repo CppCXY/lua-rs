@@ -1333,7 +1333,7 @@ mod tests {
         assert_eq!(table.get::<i64>("port").unwrap(), 3000);
         assert_eq!(
             table
-                .get::<Table>("tags")
+                .get::<LuaTable>("tags")
                 .unwrap()
                 .sequence_values::<String>()
                 .unwrap(),
@@ -1393,7 +1393,7 @@ mod tests {
         assert_eq!(table.get::<i64>("port").unwrap(), 3001);
         assert_eq!(
             table
-                .get::<Table>("tags")
+                .get::<LuaTable>("tags")
                 .unwrap()
                 .sequence_values::<String>()
                 .unwrap(),

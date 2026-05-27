@@ -8,7 +8,7 @@
 /// - Lua table (array-like) -> JSON array
 /// - Lua table (map-like) -> JSON object
 /// - Other types -> error or special handling
-use crate::lua_value::LuaValue;
+use crate::{LuaRawTable, lua_value::LuaValue};
 use serde_json::{Map, Number, Value as JsonValue};
 use std::collections::HashSet;
 
@@ -104,7 +104,7 @@ fn to_value_internal(
     }
 }
 
-fn is_array_like(table: &crate::lua_value::LuaTable) -> bool {
+fn is_array_like(table: &LuaRawTable) -> bool {
     // Get all keys
     let keys = table.iter_keys();
 
@@ -144,7 +144,7 @@ fn is_array_like(table: &crate::lua_value::LuaTable) -> bool {
 }
 
 fn table_to_json_array(
-    table: &crate::lua_value::LuaTable,
+    table: &LuaRawTable,
     visited: &mut HashSet<usize>,
 ) -> Result<JsonValue, String> {
     let mut array = Vec::new();
@@ -167,7 +167,7 @@ fn table_to_json_array(
 }
 
 fn table_to_json_object(
-    table: &crate::lua_value::LuaTable,
+    table: &LuaRawTable,
     visited: &mut HashSet<usize>,
 ) -> Result<JsonValue, String> {
     let mut object = Map::new();
