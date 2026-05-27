@@ -70,6 +70,12 @@ impl<T> PagedPool<T> {
     }
 
     pub fn alloc(&mut self, value: T) -> Pooled<T> {
+        #[cfg(miri)]
+        {
+            return Pooled::boxed(value);
+        }
+
+        #[cfg(not(miri))]
         let slot = {
             let mut inner = self.inner.borrow_mut();
             if inner.free_slots.is_empty() {
@@ -92,8 +98,10 @@ impl<T> PagedPool<T> {
         };
 
         Pooled {
-            slot,
-            pool: Rc::clone(&self.inner),
+            repr: PooledRepr::Slot {
+                slot,
+                pool: Rc::clone(&self.inner),
+            },
         }
     }
 }
@@ -104,20 +112,44 @@ impl<T> Default for PagedPool<T> {
     }
 }
 
+enum PooledRepr<T> {
+    Slot {
+        slot: NonNull<PageSlot<T>>,
+        pool: Rc<RefCell<PagedPoolInner<T>>>,
+    },
+    #[cfg(any(miri, feature = "shared-proto"))]
+    Boxed(Box<T>),
+}
+
 pub struct Pooled<T> {
-    slot: NonNull<PageSlot<T>>,
-    pool: Rc<RefCell<PagedPoolInner<T>>>,
+    repr: PooledRepr<T>,
 }
 
 impl<T> Pooled<T> {
+    #[cfg(any(miri, feature = "shared-proto"))]
+    #[inline(always)]
+    pub fn boxed(value: T) -> Self {
+        Self {
+            repr: PooledRepr::Boxed(Box::new(value)),
+        }
+    }
+
     #[inline(always)]
     pub fn as_ptr(&self) -> *const T {
-        unsafe { (*self.slot.as_ptr()).value_ptr() }
+        match &self.repr {
+            PooledRepr::Slot { slot, .. } => unsafe { (*slot.as_ptr()).value_ptr() },
+            #[cfg(any(miri, feature = "shared-proto"))]
+            PooledRepr::Boxed(value) => value.as_ref() as *const T,
+        }
     }
 
     #[inline(always)]
     pub fn as_mut_ptr(&self) -> *mut T {
-        unsafe { (&mut *self.slot.as_ptr()).value_mut_ptr() }
+        match &self.repr {
+            PooledRepr::Slot { slot, .. } => unsafe { (&mut *slot.as_ptr()).value_mut_ptr() },
+            #[cfg(any(miri, feature = "shared-proto"))]
+            PooledRepr::Boxed(value) => value.as_ref() as *const T as *mut T,
+        }
     }
 }
 
@@ -149,14 +181,20 @@ impl<T> DerefMut for Pooled<T> {
 
 impl<T> Drop for Pooled<T> {
     fn drop(&mut self) {
-        let mut inner = self.pool.borrow_mut();
-        unsafe {
-            let slot = &mut *self.slot.as_ptr();
-            if slot.occupied {
-                std::ptr::drop_in_place(slot.value_mut_ptr());
-                slot.occupied = false;
-                inner.free_slots.push(self.slot);
+        match &mut self.repr {
+            PooledRepr::Slot { slot, pool } => {
+                let mut inner = pool.borrow_mut();
+                unsafe {
+                    let slot_ref = &mut *slot.as_ptr();
+                    if slot_ref.occupied {
+                        std::ptr::drop_in_place(slot_ref.value_mut_ptr());
+                        slot_ref.occupied = false;
+                        inner.free_slots.push(*slot);
+                    }
+                }
             }
+            #[cfg(any(miri, feature = "shared-proto"))]
+            PooledRepr::Boxed(_) => {}
         }
     }
 }

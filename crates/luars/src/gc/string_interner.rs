@@ -1,6 +1,8 @@
 use ahash::RandomState;
 
 use crate::LuaValue;
+#[cfg(feature = "shared-proto")]
+use crate::gc::Pooled;
 use crate::gc::{CreateResult, GC, GcObjectOwner, GcString, PagedPool, StringPtr};
 use crate::lua_value::{InlineShortString, LuaStrRepr, LuaString};
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
@@ -67,6 +69,29 @@ impl Default for StringInterner {
 
 #[allow(unused)]
 impl StringInterner {
+    #[inline(always)]
+    fn alloc_string_owner(
+        current_white: u8,
+        lua_string: LuaString,
+        size: u32,
+        string_pool: &mut PagedPool<GcString>,
+    ) -> GcObjectOwner {
+        #[cfg(feature = "shared-proto")]
+        {
+            let _ = string_pool;
+            GcObjectOwner::String(Pooled::boxed(GcString::new(
+                lua_string,
+                current_white,
+                size,
+            )))
+        }
+
+        #[cfg(not(feature = "shared-proto"))]
+        {
+            GcObjectOwner::String(string_pool.alloc(GcString::new(lua_string, current_white, size)))
+        }
+    }
+
     pub const SHORT_STRING_LIMIT: usize = LUAI_MAXSHORTLEN;
     const INITIAL_SIZE: usize = 128;
     const MAX_LOAD_NUM: usize = 7;
@@ -182,11 +207,7 @@ impl StringInterner {
         if slen > Self::SHORT_STRING_LIMIT {
             let size = Self::long_string_size(slen);
             let lua_string = LuaString::from_bytes(LuaStrRepr::Heap(Box::<[u8]>::from(bytes)), 0);
-            let gc_string = GcObjectOwner::String(string_pool.alloc(GcString::new(
-                lua_string,
-                current_white,
-                size,
-            )));
+            let gc_string = Self::alloc_string_owner(current_white, lua_string, size, string_pool);
             let ptr = gc_string.as_str_ptr().unwrap();
             gc.trace_object(gc_string)?;
             return Ok(LuaValue::longstring(ptr));
@@ -229,11 +250,7 @@ impl StringInterner {
         if slen > Self::SHORT_STRING_LIMIT {
             let size = Self::long_string_size(slen);
             let lua_string = LuaString::from_bytes(LuaStrRepr::Heap(bytes.into_boxed_slice()), 0);
-            let gc_string = GcObjectOwner::String(string_pool.alloc(GcString::new(
-                lua_string,
-                current_white,
-                size,
-            )));
+            let gc_string = Self::alloc_string_owner(current_white, lua_string, size, string_pool);
             let ptr = gc_string.as_str_ptr().unwrap();
             gc.trace_object(gc_string)?;
             return Ok(LuaValue::longstring(ptr));
@@ -274,11 +291,7 @@ impl StringInterner {
     ) -> CreateResult {
         let size = Self::short_string_size();
         let lua_string = LuaString::from_bytes(s, hash);
-        let gc_string = GcObjectOwner::String(string_pool.alloc(GcString::new(
-            lua_string,
-            current_white,
-            size,
-        )));
+        let gc_string = Self::alloc_string_owner(current_white, lua_string, size, string_pool);
         let ptr = gc_string.as_str_ptr().unwrap();
 
         let slot = match self.find_slot(hash, ptr.as_ref().data.as_bytes()) {
