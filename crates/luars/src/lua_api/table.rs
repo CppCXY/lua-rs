@@ -189,6 +189,10 @@ impl LuaTable {
     pub(crate) fn value(&self) -> luars::LuaValue {
         self.inner.to_value()
     }
+
+    pub unsafe fn to_value(&self) -> LuaValue {
+        self.inner.to_value()
+    }
 }
 
 #[cfg(feature = "serde")]

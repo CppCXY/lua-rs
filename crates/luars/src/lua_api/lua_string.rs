@@ -30,6 +30,10 @@ impl LuaString {
     pub fn byte_len(&self) -> usize {
         self.inner.byte_len()
     }
+
+    pub unsafe fn to_value(&self) -> LuaValue {
+        self.inner.to_value()
+    }
 }
 
 impl IntoLua for LuaString {

@@ -54,6 +54,10 @@ impl LuaFunction {
     pub fn call1<A: IntoLua, R: FromLua>(&self, args: A) -> LuaResult<R> {
         self.inner.call1(args)
     }
+
+    pub unsafe fn to_value(&self) -> LuaValue {
+        self.inner.to_value()
+    }
 }
 
 impl IntoLua for LuaFunction {
