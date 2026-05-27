@@ -1,14 +1,13 @@
 // Native Lua 5.5-style table implementation
 // Port of ltable.c with minimal abstractions for maximum performance
 
+use crate::gc::{GcString, StringPtr, TableAllocHandle};
 use crate::lua_value::{
     LuaValue,
     lua_value::{LUA_TNIL, LUA_VEMPTY, LUA_VNIL, LUA_VNUMINT, LUA_VSHRSTR, Value, novariant},
     short_string_ptr_eq,
 };
-use crate::{gc::{GcString, StringPtr, TableAllocHandle},};
 
-use std::alloc::{self, Layout};
 use std::ptr;
 
 /// Node for hash table - packed to 24 bytes matching Lua 5.5's Node layout.
@@ -142,8 +141,9 @@ impl NativeTable {
         let tags_size = new_size as usize;
         let total_size = values_size + lenhint_size + tags_size;
 
-        let layout = Layout::from_size_align(total_size, std::mem::align_of::<Value>()).unwrap();
-        let start_ptr = unsafe { alloc::alloc_zeroed(layout) };
+        let start_ptr = self
+            .hash_allocator
+            .alloc_array_bytes(total_size, std::mem::align_of::<Value>());
         if start_ptr.is_null() {
             panic!("Failed to allocate array");
         }
@@ -729,9 +729,11 @@ impl NativeTable {
 
                 // array pointer points to lenhint, need to go back to start
                 let start_ptr = unsafe { self.array.sub(values_size) };
-                let layout =
-                    Layout::from_size_align(total_size, std::mem::align_of::<Value>()).unwrap();
-                unsafe { alloc::dealloc(start_ptr, layout) };
+                self.hash_allocator.free_array_bytes(
+                    start_ptr,
+                    total_size,
+                    std::mem::align_of::<Value>(),
+                );
             }
             self.array = ptr::null_mut();
             self.asize = 0;
@@ -747,8 +749,9 @@ impl NativeTable {
         let total_size = values_size + lenhint_size + tags_size;
 
         // Allocate new memory — zeroed, since LUA_VNIL==0 and Value::nil()==0
-        let layout = Layout::from_size_align(total_size, std::mem::align_of::<Value>()).unwrap();
-        let start_ptr = unsafe { alloc::alloc_zeroed(layout) };
+        let start_ptr = self
+            .hash_allocator
+            .alloc_array_bytes(total_size, std::mem::align_of::<Value>());
         if start_ptr.is_null() {
             panic!("Failed to allocate array");
         }
@@ -784,9 +787,11 @@ impl NativeTable {
             let old_values_size = old_size as usize * std::mem::size_of::<Value>();
             let old_start = unsafe { self.array.sub(old_values_size) };
             let old_total = old_values_size + lenhint_size + old_size as usize;
-            let old_layout =
-                Layout::from_size_align(old_total, std::mem::align_of::<Value>()).unwrap();
-            unsafe { alloc::dealloc(old_start, old_layout) };
+            self.hash_allocator.free_array_bytes(
+                old_start,
+                old_total,
+                std::mem::align_of::<Value>(),
+            );
         }
 
         self.array = new_array;
@@ -2078,9 +2083,11 @@ impl Drop for NativeTable {
 
             // array points to lenhint, so start is array - values_size
             let start_ptr = unsafe { self.array.sub(values_size) };
-            let layout =
-                Layout::from_size_align(total_size, std::mem::align_of::<Value>()).unwrap();
-            unsafe { alloc::dealloc(start_ptr, layout) };
+            self.hash_allocator.free_array_bytes(
+                start_ptr,
+                total_size,
+                std::mem::align_of::<Value>(),
+            );
         }
 
         // Free hash

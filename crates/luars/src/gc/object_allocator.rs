@@ -7,8 +7,9 @@ use crate::lua_vm::{CFunction, LuaState};
 use crate::{
     LuaRawFunction, LuaRawTable, LuaResult, LuaValue,
     gc::{
-        GC, GcCClosure, GcFunction, GcObjectOwner, GcProto, GcRClosure, GcTable, GcThread,
-        GcUpvalue, GcUserdata, PagedPool, ProtoPtr, StringPtr, TableAllocHandle, UpvaluePtr,
+        GC, GcCClosure, GcFunction, GcObjectOwner, GcProto, GcRClosure, GcString, GcTable,
+        GcThread, GcUpvalue, GcUserdata, PagedPool, ProtoPtr, StringPtr, TableAllocHandle,
+        UpvaluePtr,
     },
 };
 
@@ -16,7 +17,14 @@ pub type CreateResult = LuaResult<LuaValue>;
 
 pub struct ObjectAllocator {
     strings: StringInterner, // Private - use create_string() to intern
+    string_pool: PagedPool<GcString>,
     table_pool: PagedPool<GcTable>,
+    function_pool: PagedPool<GcFunction>,
+    cclosure_pool: PagedPool<GcCClosure>,
+    rclosure_pool: PagedPool<GcRClosure>,
+    upvalue_pool: PagedPool<GcUpvalue>,
+    userdata_pool: PagedPool<GcUserdata>,
+    proto_pool: PagedPool<GcProto>,
     table_allocator: TableAllocHandle,
 }
 
@@ -30,7 +38,14 @@ impl ObjectAllocator {
     pub fn new() -> Self {
         Self {
             strings: StringInterner::new(),
-            table_pool: PagedPool::default(),
+            string_pool: PagedPool::new(128),
+            table_pool: PagedPool::new(64),
+            function_pool: PagedPool::new(32),
+            cclosure_pool: PagedPool::new(16),
+            rclosure_pool: PagedPool::new(16),
+            upvalue_pool: PagedPool::new(64),
+            userdata_pool: PagedPool::new(16),
+            proto_pool: PagedPool::new(16),
             table_allocator: TableAllocHandle::default(),
         }
     }
@@ -39,28 +54,29 @@ impl ObjectAllocator {
     ///
     #[inline]
     pub fn create_string(&mut self, gc: &mut GC, s: &str) -> CreateResult {
-        self.strings.intern(s, gc)
+        self.strings.intern(s, gc, &mut self.string_pool)
     }
 
     /// Create string from owned String (avoids clone if not already interned)
     ///
     #[inline]
     pub fn create_string_owned(&mut self, gc: &mut GC, s: String) -> CreateResult {
-        self.strings.intern_owned(s, gc)
+        self.strings.intern_owned(s, gc, &mut self.string_pool)
     }
 
     /// Create a Lua string-like value from raw bytes.
     /// All short byte strings are interned so Lua string equality keeps its fast path.
     #[inline]
     pub fn create_bytes(&mut self, gc: &mut GC, bytes: &[u8]) -> CreateResult {
-        self.strings.intern_bytes(bytes, gc)
+        self.strings.intern_bytes(bytes, gc, &mut self.string_pool)
     }
 
     /// Create a raw byte string from Vec<u8> without requiring UTF-8.
     /// This compatibility path now uses the same byte-string interning rules as `create_bytes`.
     #[inline]
     pub fn create_binary(&mut self, gc: &mut GC, data: Vec<u8>) -> CreateResult {
-        self.strings.intern_bytes_owned(data, gc)
+        self.strings
+            .intern_bytes_owned(data, gc, &mut self.string_pool)
     }
 
     // ==================== Table Operations ====================
@@ -118,7 +134,11 @@ impl ObjectAllocator {
     pub fn create_proto(&mut self, gc: &mut GC, chunk: LuaProto) -> LuaResult<ProtoPtr> {
         let current_white = gc.current_white;
         let size = std::mem::size_of::<GcProto>() as u32 + chunk.proto_data_size;
-        let gc_proto = GcObjectOwner::Proto(Box::new(GcProto::new(chunk, current_white, size)));
+        let gc_proto = GcObjectOwner::Proto(self.proto_pool.alloc(GcProto::new(
+            chunk,
+            current_white,
+            size,
+        )));
         let ptr = gc_proto.as_proto_ptr().unwrap();
         gc.trace_object(gc_proto)?;
         Ok(ptr)
@@ -138,7 +158,7 @@ impl ObjectAllocator {
         let upval_size = upvalue_store.len() * std::mem::size_of::<UpvaluePtr>();
         let size = std::mem::size_of::<GcFunction>() as u32 + upval_size as u32;
 
-        let gc_func = GcObjectOwner::Function(Box::new(GcFunction::new(
+        let gc_func = GcObjectOwner::Function(self.function_pool.alloc(GcFunction::new(
             LuaRawFunction::new(chunk, upvalue_store),
             current_white,
             size,
@@ -161,7 +181,7 @@ impl ObjectAllocator {
         let current_white = gc.current_white;
         let size = std::mem::size_of::<CFunction>() as u32
             + (upvalues.len() as u32 * std::mem::size_of::<LuaValue>() as u32);
-        let gc_func = GcObjectOwner::CClosure(Box::new(GcCClosure::new(
+        let gc_func = GcObjectOwner::CClosure(self.cclosure_pool.alloc(GcCClosure::new(
             CClosureFunction::new(func, upvalues),
             current_white,
             size,
@@ -184,7 +204,7 @@ impl ObjectAllocator {
         let current_white = gc.current_white;
         let size = std::mem::size_of::<GcRClosure>() as u32
             + (upvalues.len() as u32 * std::mem::size_of::<LuaValue>() as u32);
-        let gc_func = GcObjectOwner::RClosure(Box::new(GcRClosure::new(
+        let gc_func = GcObjectOwner::RClosure(self.rclosure_pool.alloc(GcRClosure::new(
             RClosureFunction::new(func, upvalues),
             current_white,
             size,
@@ -201,12 +221,14 @@ impl ObjectAllocator {
     pub fn create_upvalue(&mut self, gc: &mut GC, upvalue: LuaUpvalue) -> LuaResult<UpvaluePtr> {
         let current_white = gc.current_white;
         let size = 64;
-        let mut boxed = Box::new(GcUpvalue::new(upvalue, current_white, size));
+        let mut pooled = self
+            .upvalue_pool
+            .alloc(GcUpvalue::new(upvalue, current_white, size));
         // Fix up closed upvalue's v pointer to its own closed_value field.
         // Must happen after boxing so the heap address is stable.
         // No-op for open upvalues (v already points to valid stack slot).
-        boxed.data.fix_closed_ptr();
-        let gc_uv = GcObjectOwner::Upvalue(boxed);
+        pooled.data.fix_closed_ptr();
+        let gc_uv = GcObjectOwner::Upvalue(pooled);
         let ptr = gc_uv.as_upvalue_ptr().unwrap();
         gc.trace_object(gc_uv)?;
         Ok(ptr)
@@ -218,7 +240,7 @@ impl ObjectAllocator {
     pub fn create_userdata(&mut self, gc: &mut GC, userdata: LuaUserdata) -> CreateResult {
         let current_white = gc.current_white;
         let size = std::mem::size_of::<LuaUserdata>();
-        let gc_userdata = GcObjectOwner::Userdata(Box::new(GcUserdata::new(
+        let gc_userdata = GcObjectOwner::Userdata(self.userdata_pool.alloc(GcUserdata::new(
             userdata,
             current_white,
             size as u32,
