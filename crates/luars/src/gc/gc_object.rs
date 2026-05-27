@@ -1,6 +1,6 @@
 use crate::{
     LuaProto, LuaRawFunction, LuaRawTable,
-    gc::GcObjectKind,
+    gc::{GcObjectKind, Pooled},
     lua_value::{CClosureFunction, LuaString, LuaUpvalue, LuaUserdata, RClosureFunction},
     lua_vm::LuaState,
 };
@@ -727,15 +727,15 @@ impl From<ProtoPtr> for GcObjectPtr {
 
 // ============ GC-managed Objects ============
 pub enum GcObjectOwner {
-    String(Box<GcString>),
-    Table(Box<GcTable>),
-    Function(Box<GcFunction>),
-    Upvalue(Box<GcUpvalue>),
+    String(Pooled<GcString>),
+    Table(Pooled<GcTable>),
+    Function(Pooled<GcFunction>),
+    Upvalue(Pooled<GcUpvalue>),
     Thread(Box<GcThread>),
-    Userdata(Box<GcUserdata>),
-    CClosure(Box<GcCClosure>),
-    RClosure(Box<GcRClosure>),
-    Proto(Box<GcProto>),
+    Userdata(Pooled<GcUserdata>),
+    CClosure(Pooled<GcCClosure>),
+    RClosure(Pooled<GcRClosure>),
+    Proto(Pooled<GcProto>),
 }
 
 impl GcObjectOwner {
@@ -748,15 +748,15 @@ impl GcObjectOwner {
     #[inline(always)]
     fn raw_header_ptr(&self) -> *mut GcHeader {
         match self {
-            GcObjectOwner::String(s) => Self::box_raw_ptr(s) as *mut GcHeader,
-            GcObjectOwner::Table(t) => Self::box_raw_ptr(t) as *mut GcHeader,
-            GcObjectOwner::Function(f) => Self::box_raw_ptr(f) as *mut GcHeader,
-            GcObjectOwner::CClosure(c) => Self::box_raw_ptr(c) as *mut GcHeader,
-            GcObjectOwner::RClosure(r) => Self::box_raw_ptr(r) as *mut GcHeader,
-            GcObjectOwner::Upvalue(u) => Self::box_raw_ptr(u) as *mut GcHeader,
-            GcObjectOwner::Thread(t) => Self::box_raw_ptr(t) as *mut GcHeader,
-            GcObjectOwner::Userdata(u) => Self::box_raw_ptr(u) as *mut GcHeader,
-            GcObjectOwner::Proto(p) => Self::box_raw_ptr(p) as *mut GcHeader,
+            GcObjectOwner::String(s) => s.as_ptr() as *mut GcHeader,
+            GcObjectOwner::Table(t) => t.as_ptr() as *mut GcHeader,
+            GcObjectOwner::Function(f) => f.as_ptr() as *mut GcHeader,
+            GcObjectOwner::CClosure(c) => c.as_ptr() as *mut GcHeader,
+            GcObjectOwner::RClosure(r) => r.as_ptr() as *mut GcHeader,
+            GcObjectOwner::Upvalue(u) => u.as_ptr() as *mut GcHeader,
+            GcObjectOwner::Thread(t) => t.as_ref() as *const _ as *mut GcHeader,
+            GcObjectOwner::Userdata(u) => u.as_ptr() as *mut GcHeader,
+            GcObjectOwner::Proto(p) => p.as_ptr() as *mut GcHeader,
         }
     }
 
@@ -768,92 +768,82 @@ impl GcObjectOwner {
         unsafe { &*self.raw_header_ptr() }
     }
 
-    /// Read the heap pointer from a `&Box<T>` without going through `Deref`,
-    /// avoiding Miri's Stacked Borrows retag that would be invalidated when
-    /// the Box moves into GcList. Box<T> is layout-compatible with *const T
-    /// on the default allocator — this reads the internal raw pointer directly.
-    #[inline(always)]
-    #[allow(clippy::borrowed_box)]
-    fn box_raw_ptr<T>(b: &Box<T>) -> *const T {
-        unsafe { *(b as *const Box<T> as *const *const T) }
-    }
-
     /// Get type tag of this object
     #[inline(always)]
     pub fn as_str_ptr(&self) -> Option<StringPtr> {
         match self {
-            GcObjectOwner::String(s) => Some(StringPtr::new(Self::box_raw_ptr(s))),
+            GcObjectOwner::String(s) => Some(StringPtr::new(s.as_ptr())),
             _ => None,
         }
     }
 
     pub fn as_table_ptr(&self) -> Option<TablePtr> {
         match self {
-            GcObjectOwner::Table(t) => Some(TablePtr::new(Self::box_raw_ptr(t))),
+            GcObjectOwner::Table(t) => Some(TablePtr::new(t.as_ptr())),
             _ => None,
         }
     }
 
     pub fn as_function_ptr(&self) -> Option<FunctionPtr> {
         match self {
-            GcObjectOwner::Function(f) => Some(FunctionPtr::new(Self::box_raw_ptr(f))),
+            GcObjectOwner::Function(f) => Some(FunctionPtr::new(f.as_ptr())),
             _ => None,
         }
     }
 
     pub fn as_upvalue_ptr(&self) -> Option<UpvaluePtr> {
         match self {
-            GcObjectOwner::Upvalue(u) => Some(UpvaluePtr::new(Self::box_raw_ptr(u))),
+            GcObjectOwner::Upvalue(u) => Some(UpvaluePtr::new(u.as_ptr())),
             _ => None,
         }
     }
 
     pub fn as_thread_ptr(&self) -> Option<ThreadPtr> {
         match self {
-            GcObjectOwner::Thread(t) => Some(ThreadPtr::new(Self::box_raw_ptr(t))),
+            GcObjectOwner::Thread(t) => Some(ThreadPtr::new(t.as_ref() as *const _)),
             _ => None,
         }
     }
 
     pub fn as_userdata_ptr(&self) -> Option<UserdataPtr> {
         match self {
-            GcObjectOwner::Userdata(u) => Some(UserdataPtr::new(Self::box_raw_ptr(u))),
+            GcObjectOwner::Userdata(u) => Some(UserdataPtr::new(u.as_ptr())),
             _ => None,
         }
     }
 
     pub fn as_closure_ptr(&self) -> Option<CClosurePtr> {
         match self {
-            GcObjectOwner::CClosure(c) => Some(CClosurePtr::new(Self::box_raw_ptr(c))),
+            GcObjectOwner::CClosure(c) => Some(CClosurePtr::new(c.as_ptr())),
             _ => None,
         }
     }
 
     pub fn as_rclosure_ptr(&self) -> Option<RClosurePtr> {
         match self {
-            GcObjectOwner::RClosure(r) => Some(RClosurePtr::new(Self::box_raw_ptr(r))),
+            GcObjectOwner::RClosure(r) => Some(RClosurePtr::new(r.as_ptr())),
             _ => None,
         }
     }
 
     pub fn as_proto_ptr(&self) -> Option<ProtoPtr> {
         match self {
-            GcObjectOwner::Proto(p) => Some(ProtoPtr::new(Self::box_raw_ptr(p))),
+            GcObjectOwner::Proto(p) => Some(ProtoPtr::new(p.as_ptr())),
             _ => None,
         }
     }
 
     pub fn as_gc_ptr(&self) -> GcObjectPtr {
         match self {
-            GcObjectOwner::String(s) => GcObjectPtr::from(StringPtr::new(Self::box_raw_ptr(s))),
-            GcObjectOwner::Table(t) => GcObjectPtr::from(TablePtr::new(Self::box_raw_ptr(t))),
-            GcObjectOwner::Function(f) => GcObjectPtr::from(FunctionPtr::new(Self::box_raw_ptr(f))),
-            GcObjectOwner::Upvalue(u) => GcObjectPtr::from(UpvaluePtr::new(Self::box_raw_ptr(u))),
-            GcObjectOwner::Thread(t) => GcObjectPtr::from(ThreadPtr::new(Self::box_raw_ptr(t))),
-            GcObjectOwner::Userdata(u) => GcObjectPtr::from(UserdataPtr::new(Self::box_raw_ptr(u))),
-            GcObjectOwner::CClosure(c) => GcObjectPtr::from(CClosurePtr::new(Self::box_raw_ptr(c))),
-            GcObjectOwner::RClosure(r) => GcObjectPtr::from(RClosurePtr::new(Self::box_raw_ptr(r))),
-            GcObjectOwner::Proto(p) => GcObjectPtr::from(ProtoPtr::new(Self::box_raw_ptr(p))),
+            GcObjectOwner::String(s) => GcObjectPtr::from(StringPtr::new(s.as_ptr())),
+            GcObjectOwner::Table(t) => GcObjectPtr::from(TablePtr::new(t.as_ptr())),
+            GcObjectOwner::Function(f) => GcObjectPtr::from(FunctionPtr::new(f.as_ptr())),
+            GcObjectOwner::Upvalue(u) => GcObjectPtr::from(UpvaluePtr::new(u.as_ptr())),
+            GcObjectOwner::Thread(t) => GcObjectPtr::from(ThreadPtr::new(t.as_ref() as *const _)),
+            GcObjectOwner::Userdata(u) => GcObjectPtr::from(UserdataPtr::new(u.as_ptr())),
+            GcObjectOwner::CClosure(c) => GcObjectPtr::from(CClosurePtr::new(c.as_ptr())),
+            GcObjectOwner::RClosure(r) => GcObjectPtr::from(RClosurePtr::new(r.as_ptr())),
+            GcObjectOwner::Proto(p) => GcObjectPtr::from(ProtoPtr::new(p.as_ptr())),
         }
     }
 

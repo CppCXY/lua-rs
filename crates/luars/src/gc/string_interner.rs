@@ -1,7 +1,9 @@
 use ahash::RandomState;
 
 use crate::LuaValue;
-use crate::gc::{CreateResult, GC, GcObjectOwner, GcString, StringPtr};
+#[cfg(feature = "shared-proto")]
+use crate::gc::Pooled;
+use crate::gc::{CreateResult, GC, GcObjectOwner, GcString, PagedPool, StringPtr};
 use crate::lua_value::{InlineShortString, LuaStrRepr, LuaString};
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 
@@ -67,6 +69,29 @@ impl Default for StringInterner {
 
 #[allow(unused)]
 impl StringInterner {
+    #[inline(always)]
+    fn alloc_string_owner(
+        current_white: u8,
+        lua_string: LuaString,
+        size: u32,
+        string_pool: &mut PagedPool<GcString>,
+    ) -> GcObjectOwner {
+        #[cfg(feature = "shared-proto")]
+        {
+            let _ = string_pool;
+            GcObjectOwner::String(Pooled::boxed(GcString::new(
+                lua_string,
+                current_white,
+                size,
+            )))
+        }
+
+        #[cfg(not(feature = "shared-proto"))]
+        {
+            GcObjectOwner::String(string_pool.alloc(GcString::new(lua_string, current_white, size)))
+        }
+    }
+
     pub const SHORT_STRING_LIMIT: usize = LUAI_MAXSHORTLEN;
     const INITIAL_SIZE: usize = 128;
     const MAX_LOAD_NUM: usize = 7;
@@ -150,25 +175,39 @@ impl StringInterner {
     }
 
     #[inline]
-    pub fn intern(&mut self, s: &str, gc: &mut GC) -> CreateResult {
-        self.intern_bytes(s.as_bytes(), gc)
+    pub fn intern(
+        &mut self,
+        s: &str,
+        gc: &mut GC,
+        string_pool: &mut PagedPool<GcString>,
+    ) -> CreateResult {
+        self.intern_bytes(s.as_bytes(), gc, string_pool)
     }
 
     #[inline]
-    pub fn intern_owned(&mut self, s: String, gc: &mut GC) -> CreateResult {
-        self.intern_bytes_owned(s.into_bytes(), gc)
+    pub fn intern_owned(
+        &mut self,
+        s: String,
+        gc: &mut GC,
+        string_pool: &mut PagedPool<GcString>,
+    ) -> CreateResult {
+        self.intern_bytes_owned(s.into_bytes(), gc, string_pool)
     }
 
     #[inline]
-    pub fn intern_bytes(&mut self, bytes: &[u8], gc: &mut GC) -> CreateResult {
+    pub fn intern_bytes(
+        &mut self,
+        bytes: &[u8],
+        gc: &mut GC,
+        string_pool: &mut PagedPool<GcString>,
+    ) -> CreateResult {
         let current_white = gc.current_white;
         let slen = bytes.len();
 
         if slen > Self::SHORT_STRING_LIMIT {
             let size = Self::long_string_size(slen);
             let lua_string = LuaString::from_bytes(LuaStrRepr::Heap(Box::<[u8]>::from(bytes)), 0);
-            let gc_string =
-                GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
+            let gc_string = Self::alloc_string_owner(current_white, lua_string, size, string_pool);
             let ptr = gc_string.as_str_ptr().unwrap();
             gc.trace_object(gc_string)?;
             return Ok(LuaValue::longstring(ptr));
@@ -189,19 +228,29 @@ impl StringInterner {
         if self.should_grow() {
             self.grow(gc);
         }
-        self.create_short_string(Self::make_short_string_repr(bytes), hash, current_white, gc)
+        self.create_short_string(
+            Self::make_short_string_repr(bytes),
+            hash,
+            current_white,
+            gc,
+            string_pool,
+        )
     }
 
     #[inline]
-    pub fn intern_bytes_owned(&mut self, bytes: Vec<u8>, gc: &mut GC) -> CreateResult {
+    pub fn intern_bytes_owned(
+        &mut self,
+        bytes: Vec<u8>,
+        gc: &mut GC,
+        string_pool: &mut PagedPool<GcString>,
+    ) -> CreateResult {
         let current_white = gc.current_white;
         let slen = bytes.len();
 
         if slen > Self::SHORT_STRING_LIMIT {
             let size = Self::long_string_size(slen);
             let lua_string = LuaString::from_bytes(LuaStrRepr::Heap(bytes.into_boxed_slice()), 0);
-            let gc_string =
-                GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
+            let gc_string = Self::alloc_string_owner(current_white, lua_string, size, string_pool);
             let ptr = gc_string.as_str_ptr().unwrap();
             gc.trace_object(gc_string)?;
             return Ok(LuaValue::longstring(ptr));
@@ -227,6 +276,7 @@ impl StringInterner {
             hash,
             current_white,
             gc,
+            string_pool,
         )
     }
 
@@ -237,11 +287,11 @@ impl StringInterner {
         hash: u64,
         current_white: u8,
         gc: &mut GC,
+        string_pool: &mut PagedPool<GcString>,
     ) -> CreateResult {
         let size = Self::short_string_size();
         let lua_string = LuaString::from_bytes(s, hash);
-        let gc_string =
-            GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
+        let gc_string = Self::alloc_string_owner(current_white, lua_string, size, string_pool);
         let ptr = gc_string.as_str_ptr().unwrap();
 
         let slot = match self.find_slot(hash, ptr.as_ref().data.as_bytes()) {
@@ -337,19 +387,28 @@ mod tests {
     use super::StringInterner;
     #[cfg(feature = "shared-proto")]
     use super::share_lua_value;
-    use crate::gc::GC;
+    use crate::gc::{GC, GcString, PagedPool};
     use crate::lua_value::LuaStrRepr;
     use crate::lua_vm::SafeOption;
 
     #[test]
     fn short_string_storage_boundaries_stay_local_by_default() {
         let mut interner = StringInterner::new();
+        let mut string_pool = PagedPool::<GcString>::default();
         let mut gc = GC::new(SafeOption::default());
 
-        let smol = interner.intern(&"a".repeat(23), &mut gc).unwrap();
-        let heap_24 = interner.intern(&"b".repeat(24), &mut gc).unwrap();
-        let heap_40 = interner.intern(&"c".repeat(40), &mut gc).unwrap();
-        let heap_41 = interner.intern(&"d".repeat(41), &mut gc).unwrap();
+        let smol = interner
+            .intern(&"a".repeat(23), &mut gc, &mut string_pool)
+            .unwrap();
+        let heap_24 = interner
+            .intern(&"b".repeat(24), &mut gc, &mut string_pool)
+            .unwrap();
+        let heap_40 = interner
+            .intern(&"c".repeat(40), &mut gc, &mut string_pool)
+            .unwrap();
+        let heap_41 = interner
+            .intern(&"d".repeat(41), &mut gc, &mut string_pool)
+            .unwrap();
 
         assert!(smol.is_short_string());
         assert!(heap_24.is_short_string());
@@ -379,9 +438,10 @@ mod tests {
     fn explicit_share_marks_existing_string_as_shared() {
         let key = "0123456789abcdefghijklmnopqr";
         let mut interner = StringInterner::new();
+        let mut string_pool = PagedPool::<GcString>::default();
         let mut gc = GC::new(SafeOption::default());
 
-        let mut value = interner.intern(key, &mut gc).unwrap();
+        let mut value = interner.intern(key, &mut gc, &mut string_pool).unwrap();
         let ptr_before = value.as_string_ptr().unwrap().as_u64();
 
         assert!(share_lua_value(&mut value));
@@ -398,11 +458,17 @@ mod tests {
         let key = "0123456789abcdefghijklmnopqr";
         let mut left_interner = StringInterner::new();
         let mut right_interner = StringInterner::new();
+        let mut left_pool = PagedPool::<GcString>::default();
+        let mut right_pool = PagedPool::<GcString>::default();
         let mut left_gc = GC::new(SafeOption::default());
         let mut right_gc = GC::new(SafeOption::default());
 
-        let mut shared_value = left_interner.intern(key, &mut left_gc).unwrap();
-        let local_value = right_interner.intern(key, &mut right_gc).unwrap();
+        let mut shared_value = left_interner
+            .intern(key, &mut left_gc, &mut left_pool)
+            .unwrap();
+        let local_value = right_interner
+            .intern(key, &mut right_gc, &mut right_pool)
+            .unwrap();
 
         assert!(share_lua_value(&mut shared_value));
 

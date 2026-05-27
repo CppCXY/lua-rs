@@ -55,6 +55,8 @@ impl LuaFunction {
         self.inner.call1(args)
     }
 
+    /// # Safety
+    /// The returned `LuaValue` must not be used after the `LuaFunction` is
     pub unsafe fn to_value(&self) -> LuaValue {
         self.inner.to_value()
     }

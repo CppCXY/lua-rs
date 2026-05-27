@@ -37,7 +37,9 @@
 mod gc_kind;
 mod gc_object;
 mod object_allocator;
+mod paged_pool;
 mod string_interner;
+mod table_allocator;
 
 use std::collections::HashSet;
 
@@ -49,7 +51,9 @@ use crate::{
 pub use gc_kind::*;
 pub use gc_object::*;
 pub use object_allocator::*;
+pub use paged_pool::*;
 pub use string_interner::*;
+pub use table_allocator::*;
 
 // GC Parameters (from lua.h)
 pub const MINORMUL: usize = 0; // Minor collection multiplier
