@@ -41,8 +41,6 @@ mod paged_pool;
 mod string_interner;
 mod table_allocator;
 
-use std::collections::HashSet;
-
 use crate::{
     LuaRawTable, LuaResult,
     lua_value::LuaValue,
@@ -1369,91 +1367,25 @@ impl GC {
         self.clear_gray_lists();
         self.gc_state = GcState::SwpAllGc;
 
-        let mut to_clear_hash_set = HashSet::new();
-        self.sweep2old(l, &mut to_clear_hash_set);
+        let other_white = GcHeader::otherwhite(self.current_white);
 
-        if !to_clear_hash_set.is_empty() {
-            let finobjs = std::mem::take(&mut self.finobj);
-            for obj_ptr in finobjs {
-                if !to_clear_hash_set.contains(&obj_ptr) {
-                    self.finobj.push(obj_ptr);
-                }
-            }
+        let allgc_objects = self.allgc.take_all();
+        self.sweep2old_owned_list(l, allgc_objects, other_white);
 
-            // CRITICAL BUG FIX: Don't remove objects from tobefnz even if marked for clearing
-            // Objects in tobefnz need to have their finalizers called. If they're in
-            // to_clear_hash_set (white), we make them old+black to prevent collection.
-            // This fixes the issue where finalizers weren't called in generational GC.
-            let tobefnz = std::mem::take(&mut self.tobefnz);
-            for obj_ptr in tobefnz {
-                if to_clear_hash_set.contains(&obj_ptr) {
-                    // Object was marked for clearing but needs finalization
-                    // Remove from clear set and make it old+black
-                    to_clear_hash_set.remove(&obj_ptr);
-                    if let Some(header) = obj_ptr.header_mut() {
-                        header.set_age(G_OLD);
-                        header.make_black();
-                    }
-                }
-                self.tobefnz.push(obj_ptr);
-            }
+        let survival_objects = self.survival.take_all();
+        self.sweep2old_owned_list(l, survival_objects, other_white);
 
-            for gc_ptr in to_clear_hash_set {
-                if gc_ptr.is_string() {
-                    Self::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
-                }
-                // Remove from the appropriate generation list
-                if let Some(header) = gc_ptr.header() {
-                    match header.age() {
-                        G_NEW => {
-                            let obj = self.allgc.remove(gc_ptr);
-                            self.total_bytes -= obj.size() as isize;
-                            self.release_object(obj);
-                        }
-                        G_SURVIVAL => {
-                            let obj = self.survival.remove(gc_ptr);
-                            self.total_bytes -= obj.size() as isize;
-                            self.release_object(obj);
-                        }
-                        G_OLD1 => {
-                            let obj = self.old1.remove(gc_ptr);
-                            self.total_bytes -= obj.size() as isize;
-                            self.release_object(obj);
-                        }
-                        _ => {
-                            let obj = self.old.remove(gc_ptr);
-                            self.total_bytes -= obj.size() as isize;
-                            self.release_object(obj);
-                        }
-                    }
-                } else {
-                    // Fallback: try each list
-                    let obj = if self.allgc.contains(gc_ptr) {
-                        self.allgc.remove(gc_ptr)
-                    } else if self.survival.contains(gc_ptr) {
-                        self.survival.remove(gc_ptr)
-                    } else if self.old1.contains(gc_ptr) {
-                        self.old1.remove(gc_ptr)
-                    } else if self.old.contains(gc_ptr) {
-                        self.old.remove(gc_ptr)
-                    } else {
-                        continue;
-                    };
-                    self.total_bytes -= obj.size() as isize;
-                    self.release_object(obj);
-                }
-            }
-        }
+        let old_objects = self.old.take_all();
+        self.sweep2old_owned_list(l, old_objects, other_white);
 
-        // Move all surviving objects from allgc/survival/old1 into old list
-        // (In Lua 5.5: g->reallyold = g->old1 = g->survival = g->allgc;
-        //  All pointers merge into one list since everything is now G_OLD)
-        let allgc_survivors = self.allgc.take_all();
-        self.old.add_all(allgc_survivors);
-        let survival_survivors = self.survival.take_all();
-        self.old.add_all(survival_survivors);
-        let old1_survivors = self.old1.take_all();
-        self.old.add_all(old1_survivors);
+        let old1_objects = self.old1.take_all();
+        self.sweep2old_owned_list(l, old1_objects, other_white);
+
+        let finobj = std::mem::take(&mut self.finobj);
+        self.finobj = self.sweep2old_ptr_list(finobj, other_white);
+
+        let tobefnz = std::mem::take(&mut self.tobefnz);
+        self.tobefnz = self.sweep2old_ptr_list(tobefnz, other_white);
 
         self.gc_kind = GcKind::GenMinor;
         // BUG FIX: gc_majorminor must be the total live bytes, not accumulated
@@ -2787,128 +2719,70 @@ impl GC {
         }
     }
 
-    fn sweep2old(&mut self, _l: &mut LuaState, to_clear_list: &mut HashSet<GcObjectPtr>) {
-        //  Use other_white to distinguish dead objects from new objects
-        // - current_white: new objects created in this cycle
-        // - other_white: dead objects from previous cycle
-        // Port of Lua 5.5 lgc.c sweep2old: uses isdeadm(ow, marked)
-        let other_white = GcHeader::otherwhite(self.current_white);
+    fn sweep2old_owned_list(
+        &mut self,
+        l: &mut LuaState,
+        objects: Vec<GcObjectOwner>,
+        other_white: u8,
+    ) {
+        for gc_owner in objects {
+            let gc_ptr = gc_owner.as_gc_ptr();
+            let header = gc_owner.header();
 
-        // Helper closure to process a single object
-        let process_object = |gc_ptr: GcObjectPtr,
-                              to_clear: &mut HashSet<GcObjectPtr>,
-                              grayagain: &mut Vec<GcObjectPtr>|
-         -> bool {
-            let Some(header) = gc_ptr.header() else {
-                return false; // Keep object (no header)
+            if header.is_dead(other_white) && !header.to_finalize() {
+                if gc_ptr.is_string() {
+                    Self::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
+                }
+                self.total_bytes -= gc_owner.size() as isize;
+                self.release_object(gc_owner);
+                continue;
+            }
+
+            self.make_old_survivor(gc_ptr, gc_owner.header_mut());
+            self.old.add(gc_owner);
+        }
+    }
+
+    fn sweep2old_ptr_list(
+        &mut self,
+        objects: Vec<GcObjectPtr>,
+        other_white: u8,
+    ) -> Vec<GcObjectPtr> {
+        let mut survivors = Vec::with_capacity(objects.len());
+
+        for gc_ptr in objects {
+            let Some(header) = gc_ptr.header_mut() else {
+                continue;
             };
 
-            // CRITICAL FIX: Use is_dead(other_white) instead of is_white()
-            if header.is_dead(other_white) {
-                to_clear.insert(gc_ptr);
-                true // Mark for removal
+            if header.is_dead(other_white) && !header.to_finalize() {
+                continue;
+            }
+
+            self.make_old_survivor(gc_ptr, header);
+            survivors.push(gc_ptr);
+        }
+
+        survivors
+    }
+
+    fn make_old_survivor(&mut self, gc_ptr: GcObjectPtr, header: &GcHeader) {
+        header.set_age(G_OLD);
+        if gc_ptr.kind() == GcObjectKind::Thread {
+            if header.is_white() {
+                header.make_gray();
+            }
+            self.grayagain.push(gc_ptr);
+        } else if gc_ptr.is_upvalue() {
+            let uv_ptr = gc_ptr.as_upvalue_ptr();
+            let gc_upval = uv_ptr.as_mut_ref();
+            if gc_upval.data.is_open() {
+                header.make_gray();
             } else {
-                if let Some(header_mut) = gc_ptr.header_mut() {
-                    header_mut.set_age(G_OLD);
-                    if gc_ptr.kind() == GcObjectKind::Thread {
-                        // BUG FIX: Threads added to grayagain must NOT be white.
-                        // After sweep_gen, surviving G_NEW threads are white(current).
-                        // If left white, correctgraylist will remove them as "dead",
-                        // but they're actually alive. This causes use-after-free crashes.
-                        // C Lua avoids this because sweep2old runs after a full incremental
-                        // cycle (not after sweep_gen), so threads are already non-white.
-                        if header_mut.is_white() {
-                            header_mut.make_gray();
-                        }
-                        grayagain.push(gc_ptr);
-                    } else if gc_ptr.is_upvalue() {
-                        let uv_ptr = gc_ptr.as_upvalue_ptr();
-                        let gc_upval = uv_ptr.as_mut_ref();
-                        if gc_upval.data.is_open() {
-                            header_mut.make_gray();
-                        } else {
-                            header_mut.make_black();
-                        }
-                    } else {
-                        header_mut.make_black();
-                    }
-                }
-                false // Keep object
+                header.make_black();
             }
-        };
-
-        // Process allgc list (G_NEW objects)
-        let mut i = self.allgc.len();
-        while i > 0 {
-            i -= 1;
-            if let Some(obj) = self.allgc.get(i) {
-                let gc_ptr = obj.as_gc_ptr();
-                process_object(gc_ptr, to_clear_list, &mut self.grayagain);
-            }
-        }
-
-        // Process survival list (G_SURVIVAL objects)
-        let mut i = self.survival.len();
-        while i > 0 {
-            i -= 1;
-            if let Some(obj) = self.survival.get(i) {
-                let gc_ptr = obj.as_gc_ptr();
-                process_object(gc_ptr, to_clear_list, &mut self.grayagain);
-            }
-        }
-
-        // Process old list (G_OLD, G_TOUCHED* objects)
-        let mut i = self.old.len();
-        while i > 0 {
-            i -= 1;
-            if let Some(obj) = self.old.get(i) {
-                let gc_ptr = obj.as_gc_ptr();
-                process_object(gc_ptr, to_clear_list, &mut self.grayagain);
-            }
-        }
-
-        // Process old1 list (G_OLD1 objects)
-        let mut i = self.old1.len();
-        while i > 0 {
-            i -= 1;
-            if let Some(obj) = self.old1.get(i) {
-                let gc_ptr = obj.as_gc_ptr();
-                process_object(gc_ptr, to_clear_list, &mut self.grayagain);
-            }
-        }
-
-        // After sweep2old, all surviving objects are G_OLD and should be in old list
-        // Move all surviving objects from allgc, survival and old1 to old
-        while !self.allgc.is_empty() {
-            // Get the last object (we can't iterate while modifying)
-            let gc_ptr = self.allgc.get(0).unwrap().as_gc_ptr();
-            if !to_clear_list.contains(&gc_ptr) {
-                let owner = self.allgc.remove(gc_ptr);
-                self.old.add(owner);
-            } else {
-                // Dead object will be removed later, just break out
-                break;
-            }
-        }
-
-        while !self.survival.is_empty() {
-            let gc_ptr = self.survival.get(0).unwrap().as_gc_ptr();
-            if !to_clear_list.contains(&gc_ptr) {
-                let owner = self.survival.remove(gc_ptr);
-                self.old.add(owner);
-            } else {
-                break;
-            }
-        }
-
-        while !self.old1.is_empty() {
-            let gc_ptr = self.old1.get(0).unwrap().as_gc_ptr();
-            if !to_clear_list.contains(&gc_ptr) {
-                let owner = self.old1.remove(gc_ptr);
-                self.old.add(owner);
-            } else {
-                break;
-            }
+        } else {
+            header.make_black();
         }
     }
 
