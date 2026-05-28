@@ -2075,6 +2075,43 @@ impl NativeTable {
             }
         }
     }
+
+    /// GC-safe iteration matching Lua 5.5's ephemeron traversal order:
+    /// the array part is always visited in ascending order, while the hash
+    /// part can switch direction to speed convergence on chains.
+    pub fn for_each_entry_in_direction<F>(&self, reverse_hash: bool, mut f: F)
+    where
+        F: FnMut(LuaValue, LuaValue),
+    {
+        for i in 1..=self.asize as i64 {
+            unsafe {
+                if let Some(val) = self.read_array(i) {
+                    f(LuaValue::integer(i), val);
+                }
+            }
+        }
+
+        let size = self.sizenode();
+        if reverse_hash {
+            for i in (0..size).rev() {
+                unsafe {
+                    let node = self.node.add(i);
+                    if novariant((*node).key_tt) != LUA_TNIL && (*node).val_tt != LUA_VNIL {
+                        f((*node).key(), (*node).value());
+                    }
+                }
+            }
+        } else {
+            for i in 0..size {
+                unsafe {
+                    let node = self.node.add(i);
+                    if novariant((*node).key_tt) != LUA_TNIL && (*node).val_tt != LUA_VNIL {
+                        f((*node).key(), (*node).value());
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Drop for NativeTable {

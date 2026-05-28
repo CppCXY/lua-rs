@@ -919,34 +919,30 @@ impl GC {
         table_ptr: TablePtr,
         inv: bool,
     ) -> bool {
-        let entries = table_ptr.as_ref().data.iter_all();
-
         let mut marked_any = false;
         let mut has_white_keys = false;
         let mut has_white_white = false;
 
-        let mut entry_list: Vec<_> = entries.into_iter().collect();
-        if inv {
-            entry_list.reverse();
-        }
+        table_ptr
+            .as_ref()
+            .data
+            .for_each_entry_in_direction(inv, |k, v| {
+                let key_ptr = k.as_gc_ptr();
+                let val_ptr = v.as_gc_ptr();
 
-        for (k, v) in &entry_list {
-            let key_ptr = k.as_gc_ptr();
-            let val_ptr = v.as_gc_ptr();
+                let key_is_cleared = key_ptr.is_some_and(|ptr| self.is_cleared(l, ptr));
+                let val_is_white = val_ptr.is_some_and(|ptr| self.is_white(ptr));
 
-            let key_is_cleared = key_ptr.is_some_and(|ptr| self.is_cleared(l, ptr));
-            let val_is_white = val_ptr.is_some_and(|ptr| self.is_white(ptr));
-
-            if key_is_cleared {
-                has_white_keys = true;
-                if val_is_white {
-                    has_white_white = true;
+                if key_is_cleared {
+                    has_white_keys = true;
+                    if val_is_white {
+                        has_white_white = true;
+                    }
+                } else if val_is_white {
+                    self.really_mark_object(l, val_ptr.unwrap());
+                    marked_any = true;
                 }
-            } else if val_is_white {
-                self.really_mark_object(l, val_ptr.unwrap());
-                marked_any = true;
-            }
-        }
+            });
 
         if has_white_white {
             self.ephemeron.push(table_ptr);
@@ -960,34 +956,32 @@ impl GC {
     /// Port of Lua 5.5's clearbykeys
     /// Clear entries with unmarked keys from ephemeron and fully weak tables
     fn clear_by_keys(&mut self, l: &mut LuaState) {
-        // Clear ephemeron tables
-        let ephemeron_list = self.ephemeron.clone();
-        for table_ptr in ephemeron_list {
+        // Lua 5.5 walks these lists directly. We keep the lists intact for the
+        // remainder of the atomic phase, but avoid cloning the whole Vec.
+        let ephemeron_len = self.ephemeron.len();
+        for index in 0..ephemeron_len {
+            let table_ptr = self.ephemeron[index];
             self.clear_table_by_keys(l, table_ptr);
         }
 
-        // Clear fully weak tables
-        let allweak_list = self.allweak.clone();
-        for table_ptr in allweak_list {
+        let allweak_len = self.allweak.len();
+        for index in 0..allweak_len {
+            let table_ptr = self.allweak[index];
             self.clear_table_by_keys(l, table_ptr);
         }
     }
 
     /// Clear entries with unmarked keys from a single table
     fn clear_table_by_keys(&mut self, l: &mut LuaState, table_ptr: TablePtr) -> usize {
-        // CRITICAL FIX: Collect all keys first to avoid holding reference during is_cleared()
-        // This prevents use-after-free and borrowing issues
-        let entries = table_ptr.as_ref().data.iter_keys();
-
         let mut keys_to_remove = Vec::new();
 
-        for key in entries {
+        table_ptr.as_ref().data.for_each_entry(|key, _value| {
             if let Some(key_ptr) = key.as_gc_ptr()
                 && self.is_cleared(l, key_ptr)
             {
                 keys_to_remove.push(key);
             }
-        }
+        });
 
         let count = keys_to_remove.len();
         // Remove entries with dead keys
@@ -1000,36 +994,39 @@ impl GC {
 
     /// Port of Lua 5.5's clearbyvalues
     /// Clear entries with unmarked values from weak value tables
-    fn clear_by_values(&mut self, l: &mut LuaState) {
-        let weak_list = self.weak.clone();
-        for table_ptr in weak_list {
+    fn clear_by_values(&mut self, l: &mut LuaState, weak_start: usize, allweak_start: usize) {
+        // Match Lua 5.5's clearbyvalues(g, list, boundary): the second atomic
+        // pass only needs to clear resurrected weak tables added after the
+        // first clear.
+        let weak_len = self.weak.len();
+        for index in weak_start..weak_len {
+            let table_ptr = self.weak[index];
             self.clear_table_by_values(l, table_ptr);
         }
 
-        let allweak_list = self.allweak.clone();
-        for table_ptr in allweak_list {
+        let allweak_len = self.allweak.len();
+        for index in allweak_start..allweak_len {
+            let table_ptr = self.allweak[index];
             self.clear_table_by_values(l, table_ptr);
         }
     }
 
     /// Clear entries with unmarked values from a single table
     fn clear_table_by_values(&mut self, l: &mut LuaState, table_ptr: TablePtr) {
-        let entries = table_ptr.as_ref().data.iter_all();
-
         let mut keys_to_remove = Vec::new();
 
-        for (k, value) in &entries {
+        table_ptr.as_ref().data.for_each_entry(|key, value| {
             if let Some(val_ptr) = value.as_gc_ptr()
                 && self.is_cleared(l, val_ptr)
             {
-                keys_to_remove.push(*k);
+                keys_to_remove.push(key);
             }
-        }
+        });
 
         // Remove entries with dead values
         let table = &mut table_ptr.as_mut_ref().data;
-        for key in &keys_to_remove {
-            table.raw_set(key, LuaValue::nil());
+        for key in keys_to_remove {
+            table.raw_set(&key, LuaValue::nil());
         }
     }
 
@@ -1283,13 +1280,17 @@ impl GC {
 
         // Mark all threads in twups list (threads with open upvalues)
         // This ensures they are not white when remark_upvalues is called in atomic phase
-        for thread_ptr in self.twups.clone() {
+        let twups_len = self.twups.len();
+        for index in 0..twups_len {
+            let thread_ptr = self.twups[index];
             self.mark_object(l, thread_ptr.into());
         }
 
         // markbeingfnz(g): mark any object pending finalization from previous cycle
         if !self.tobefnz.is_empty() {
-            for obj_ptr in self.tobefnz.clone() {
+            let tobefnz_len = self.tobefnz.len();
+            for index in 0..tobefnz_len {
+                let obj_ptr = self.tobefnz[index];
                 self.mark_object(l, obj_ptr);
             }
         }
@@ -1524,34 +1525,40 @@ impl GC {
         self.correct_gray_list(&mut grayagain_list);
         self.grayagain = grayagain_list;
 
-        let mut weak_list = std::mem::take(&mut self.weak)
-            .iter()
-            .map(|ptr| GcObjectPtr::from(*ptr))
-            .collect::<Vec<_>>();
-        self.weak.clear();
-        // Process weak list: handle TOUCHED objects
-        self.correct_gray_list(&mut weak_list);
-        self.grayagain.extend(weak_list);
+        // Weak-table lists only contain tables, so we can process them directly
+        // and append the survivors back into grayagain without allocating a
+        // temporary Vec<GcObjectPtr> for each list.
+        let weak_list = std::mem::take(&mut self.weak);
+        Self::correct_gray_table_list(weak_list, &mut self.grayagain);
 
-        let mut allweak_list = std::mem::take(&mut self.allweak)
-            .iter()
-            .map(|ptr| GcObjectPtr::from(*ptr))
-            .collect::<Vec<_>>();
-        self.allweak.clear();
+        let allweak_list = std::mem::take(&mut self.allweak);
+        Self::correct_gray_table_list(allweak_list, &mut self.grayagain);
 
-        // Process allweak list: handle TOUCHED objects
-        self.correct_gray_list(&mut allweak_list);
-        self.grayagain.extend(allweak_list);
+        let ephemeron_list = std::mem::take(&mut self.ephemeron);
+        Self::correct_gray_table_list(ephemeron_list, &mut self.grayagain);
+    }
 
-        let mut ephemeron_list = std::mem::take(&mut self.ephemeron)
-            .iter()
-            .map(|ptr| GcObjectPtr::from(*ptr))
-            .collect::<Vec<_>>();
-        self.ephemeron.clear();
+    fn correct_gray_table_list(list: Vec<TablePtr>, grayagain: &mut Vec<GcObjectPtr>) {
+        for table_ptr in list {
+            let gc_ptr = GcObjectPtr::from(table_ptr);
+            if let Some(header) = gc_ptr.header_mut() {
+                if header.is_white() {
+                    continue;
+                }
 
-        // Process ephemeron list: handle TOUCHED objects
-        self.correct_gray_list(&mut ephemeron_list);
-        self.grayagain.extend(ephemeron_list);
+                let age = header.age();
+                if age == G_TOUCHED1 {
+                    header.make_black();
+                    header.set_age(G_TOUCHED2);
+                    grayagain.push(gc_ptr);
+                } else {
+                    if age == G_TOUCHED2 {
+                        header.set_age(G_OLD);
+                    }
+                    header.make_black();
+                }
+            }
+        }
     }
 
     // ** Correct a list of gray objects.
@@ -1676,8 +1683,9 @@ impl GC {
         self.old.add_all(to_old);
 
         // Mark OLD1 objects in finobj list
-        let finobj_list = self.finobj.clone();
-        for gc_ptr in finobj_list {
+        let finobj_len = self.finobj.len();
+        for index in 0..finobj_len {
+            let gc_ptr = self.finobj[index];
             if let Some(header) = gc_ptr.header_mut()
                 && header.age() == G_OLD1
             {
@@ -1689,8 +1697,9 @@ impl GC {
         }
 
         // Mark OLD1 objects in tobefnz list
-        let tobefnz_list = self.tobefnz.clone();
-        for gc_ptr in tobefnz_list {
+        let tobefnz_len = self.tobefnz.len();
+        for index in 0..tobefnz_len {
+            let gc_ptr = self.tobefnz[index];
             if let Some(header) = gc_ptr.header_mut()
                 && header.age() == G_OLD1
             {
@@ -2314,7 +2323,9 @@ impl GC {
 
         /* at this point, all strongly accessible objects are marked. */
         /* Clear values from weak tables, before checking finalizers */
-        self.clear_by_values(l);
+        self.clear_by_values(l, 0, 0);
+        let orig_weak_len = self.weak.len();
+        let orig_allweak_len = self.allweak.len();
 
         /* separate objects to be finalized */
         self.separate_to_be_finalized(false);
@@ -2329,9 +2340,9 @@ impl GC {
 
         self.clear_by_keys(l);
 
-        // Clear values again (for resurrected weak tables)
-        // Lua 5.5 iterates 'weak' and 'allweak' lists again here
-        self.clear_by_values(l);
+        // Lua 5.5 clears only the resurrected weak tables added after the
+        // first clearbyvalues pass.
+        self.clear_by_values(l, orig_weak_len, orig_allweak_len);
 
         self.current_white = GcHeader::otherwhite(self.current_white); // Flip current white
 
@@ -4261,7 +4272,9 @@ impl GC {
     /// previous cycle's atomic2gen protection), ensuring their transitive
     /// references (metatables, etc.) are properly marked in this cycle.
     fn mark_being_finalized(&mut self, l: &mut LuaState) {
-        for gc_ptr in self.tobefnz.clone() {
+        let tobefnz_len = self.tobefnz.len();
+        for index in 0..tobefnz_len {
+            let gc_ptr = self.tobefnz[index];
             if let Some(header) = gc_ptr.header_mut() {
                 header.make_white(self.current_white); // Force white
             }

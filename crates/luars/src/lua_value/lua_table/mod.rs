@@ -171,4 +171,11 @@ impl LuaRawTable {
     {
         self.impl_table.for_each_entry(f);
     }
+
+    pub(crate) fn for_each_entry_in_direction<F>(&self, reverse_hash: bool, f: F)
+    where
+        F: FnMut(LuaValue, LuaValue),
+    {
+        self.impl_table.for_each_entry_in_direction(reverse_hash, f);
+    }
 }
