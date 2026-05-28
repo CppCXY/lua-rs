@@ -114,7 +114,7 @@ impl SlabPool {
             .expect("valid slab page layout");
 
         let mut new_pages = Vec::with_capacity(self.pages.len());
-        for (page, keep) in self.pages.drain(..).zip(keep_page.into_iter()) {
+        for (page, keep) in self.pages.drain(..).zip(keep_page) {
             if keep {
                 new_pages.push(page);
             } else {

@@ -196,6 +196,7 @@ pub fn call_c_function(
         } else {
             lua_state.set_top_raw(func_idx + n);
         }
+        lua_state.check_gc_safe_point();
         return Ok(());
     }
 
@@ -213,6 +214,11 @@ pub fn call_c_function(
         }
         lua_state.set_top_raw(new_top);
     }
+
+    // C stdlib functions can allocate heavily without passing through the VM loop's
+    // regular check_gc_in_loop safe points. Once results are back in caller slots,
+    // they are rooted and it is safe to pay any pending debt here.
+    lua_state.check_gc_safe_point();
 
     Ok(())
 }

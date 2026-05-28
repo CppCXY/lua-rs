@@ -4401,6 +4401,14 @@ impl LuaState {
         *trap = self.hook_mask != 0;
     }
 
+    #[inline(always)]
+    pub(crate) fn check_gc_safe_point(&mut self) {
+        if self.global_state.gc_debt() > 0 {
+            return;
+        }
+        self.global_state.check_gc(self as *mut LuaState);
+    }
+
     pub fn collect_garbage(&mut self) -> LuaResult<()> {
         self.global_state.full_gc(self as *mut LuaState, false);
         Ok(())

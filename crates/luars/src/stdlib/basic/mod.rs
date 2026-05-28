@@ -5,10 +5,7 @@
 pub mod parse_number;
 mod require;
 
-use crate::gc::{
-    GcKind, GcProbeTrigger, GcState, MAJORMINOR, MINORMAJOR, MINORMUL, PAUSE, STEPMUL,
-    STEPSIZE,
-};
+use crate::gc::{GcKind, GcState, MAJORMINOR, MINORMAJOR, MINORMUL, PAUSE, STEPMUL, STEPSIZE};
 use crate::gc::{code_param, decode_param};
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{
@@ -980,17 +977,6 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
-        "probe" => {
-            let summary = l.global_state_mut().gc.gc_probe_summary();
-            let summary_value = l.create_string(&summary)?;
-            l.push_value(summary_value)?;
-            Ok(1)
-        }
-        "probe_reset" => {
-            l.global_state_mut().gc.gc_probe_reset();
-            l.push_value(LuaValue::integer(0))?;
-            Ok(1)
-        }
         "count" => {
             let gc = &l.global_state_mut().gc;
             let real_bytes = gc.total_bytes - gc.gc_debt; // gettotalbytes
@@ -1064,7 +1050,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             if l.global_state_mut().gc.gc_debt <= 0 {
                 let global: *mut crate::lua_vm::GlobalState = l.global_state_mut() as *mut _;
                 unsafe {
-                    (*global).gc.step_with_probe(l, GcProbeTrigger::ManualStep);
+                    (*global).gc.step(l);
                 }
                 work = true;
             }
