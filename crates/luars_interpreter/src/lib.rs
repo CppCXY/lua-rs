@@ -357,10 +357,6 @@ pub fn run_interpreter() {
 }
 
 fn lua_main() -> i32 {
-    let print_gc_breakdown = env::var("LUARS_GC_BREAKDOWN")
-        .ok()
-        .is_some_and(|value| value != "0");
-
     let opts = match parse_args() {
         Ok(opts) => opts,
         Err(e) => {
@@ -510,10 +506,6 @@ fn lua_main() -> i32 {
         || (opts.execute_strings.is_empty() && opts.script_file.is_none() && !opts.read_stdin)
     {
         run_repl(vm);
-    }
-
-    if print_gc_breakdown {
-        eprintln!("{}", lua.gc_breakdown());
     }
 
     0

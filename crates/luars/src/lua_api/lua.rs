@@ -37,10 +37,6 @@ impl Lua {
         library.install(self)
     }
 
-    pub fn gc_breakdown(&self) -> String {
-        self.global_state_owner.gc_breakdown()
-    }
-
     pub(crate) fn load_value(&mut self, source: &str) -> LuaResult<luars::LuaValue> {
         self.global_state_owner.main_state().load(source)
     }

@@ -61,14 +61,6 @@ pub struct StringInterner {
     ndead: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StringInternerStats {
-    pub used_entries: usize,
-    pub dead_entries: usize,
-    pub slot_capacity: usize,
-    pub retained_bytes: usize,
-}
-
 impl Default for StringInterner {
     fn default() -> Self {
         Self::new()
@@ -387,15 +379,6 @@ impl StringInterner {
 
     pub fn stats(&self) -> (usize, usize) {
         (self.nuse, self.size())
-    }
-
-    pub fn memory_stats(&self) -> StringInternerStats {
-        StringInternerStats {
-            used_entries: self.nuse,
-            dead_entries: self.ndead,
-            slot_capacity: self.size(),
-            retained_bytes: self.size() * std::mem::size_of::<StringSlot>(),
-        }
     }
 }
 

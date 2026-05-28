@@ -4,15 +4,6 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PagedPoolStats {
-    pub page_count: usize,
-    pub total_slots: usize,
-    pub live_slots: usize,
-    pub free_slots: usize,
-    pub retained_bytes: usize,
-}
-
 struct PageSlot<T> {
     occupied: bool,
     value: MaybeUninit<T>,
@@ -145,19 +136,6 @@ impl<T> PagedPool<T> {
                     pool: Rc::clone(&self.inner),
                 },
             }
-        }
-    }
-
-    pub fn stats(&self) -> PagedPoolStats {
-        let inner = self.inner.borrow();
-        let total_slots = inner.pages.iter().map(|page| page.len()).sum::<usize>();
-        let free_slots = inner.free_slots.len();
-        PagedPoolStats {
-            page_count: inner.pages.len(),
-            total_slots,
-            live_slots: total_slots.saturating_sub(free_slots),
-            free_slots,
-            retained_bytes: total_slots * std::mem::size_of::<PageSlot<T>>(),
         }
     }
 
@@ -303,9 +281,8 @@ mod tests {
         drop(first);
         drop(second);
 
-        assert_eq!(2, pool.stats().page_count);
         assert_eq!(1, pool.release_empty_pages());
-        assert_eq!(1, pool.stats().page_count);
+        assert_eq!(0, pool.release_empty_pages());
         assert_eq!(third_ptr, third.as_ptr());
         assert_eq!(3, *third);
     }

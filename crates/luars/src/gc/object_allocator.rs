@@ -15,30 +15,6 @@ use crate::{
 
 pub type CreateResult = LuaResult<LuaValue>;
 
-#[derive(Debug, Clone, Default)]
-pub struct ObjectAllocatorBreakdown {
-    pub string_interner_used: usize,
-    pub string_interner_dead: usize,
-    pub string_interner_capacity: usize,
-    pub string_interner_bytes: usize,
-    pub string_pool_bytes: usize,
-    pub table_pool_bytes: usize,
-    pub function_pool_bytes: usize,
-    pub cclosure_pool_bytes: usize,
-    pub rclosure_pool_bytes: usize,
-    pub upvalue_pool_bytes: usize,
-    pub userdata_pool_bytes: usize,
-    pub proto_pool_bytes: usize,
-    pub pool_total_slots: usize,
-    pub pool_live_slots: usize,
-    pub pool_free_slots: usize,
-    pub pool_page_count: usize,
-    pub table_cached_hash_bytes: usize,
-    pub table_cached_hash_blocks: usize,
-    pub table_cached_array_bytes: usize,
-    pub table_cached_array_blocks: usize,
-}
-
 pub struct ObjectAllocator {
     strings: StringInterner, // Private - use create_string() to intern
     string_pool: PagedPool<GcString>,
@@ -297,75 +273,5 @@ impl ObjectAllocator {
     pub fn trim_after_full_gc(&mut self) {
         self.table_pool.release_empty_pages();
         self.table_allocator.clear_cached_blocks();
-    }
-
-    pub fn breakdown(&self) -> ObjectAllocatorBreakdown {
-        let string_interner = self.strings.memory_stats();
-        let string_pool = self.string_pool.stats();
-        let table_pool = self.table_pool.stats();
-        let function_pool = self.function_pool.stats();
-        let cclosure_pool = self.cclosure_pool.stats();
-        let rclosure_pool = self.rclosure_pool.stats();
-        let upvalue_pool = self.upvalue_pool.stats();
-        let userdata_pool = self.userdata_pool.stats();
-        let proto_pool = self.proto_pool.stats();
-        let table_alloc = self.table_allocator.stats();
-
-        let pool_live_slots = string_pool.live_slots
-            + table_pool.live_slots
-            + function_pool.live_slots
-            + cclosure_pool.live_slots
-            + rclosure_pool.live_slots
-            + upvalue_pool.live_slots
-            + userdata_pool.live_slots
-            + proto_pool.live_slots;
-        let pool_free_slots = string_pool.free_slots
-            + table_pool.free_slots
-            + function_pool.free_slots
-            + cclosure_pool.free_slots
-            + rclosure_pool.free_slots
-            + upvalue_pool.free_slots
-            + userdata_pool.free_slots
-            + proto_pool.free_slots;
-        let pool_page_count = string_pool.page_count
-            + table_pool.page_count
-            + function_pool.page_count
-            + cclosure_pool.page_count
-            + rclosure_pool.page_count
-            + upvalue_pool.page_count
-            + userdata_pool.page_count
-            + proto_pool.page_count;
-
-        let pool_total_slots = string_pool.total_slots
-            + table_pool.total_slots
-            + function_pool.total_slots
-            + cclosure_pool.total_slots
-            + rclosure_pool.total_slots
-            + upvalue_pool.total_slots
-            + userdata_pool.total_slots
-            + proto_pool.total_slots;
-
-        ObjectAllocatorBreakdown {
-            string_interner_used: string_interner.used_entries,
-            string_interner_dead: string_interner.dead_entries,
-            string_interner_capacity: string_interner.slot_capacity,
-            string_interner_bytes: string_interner.retained_bytes,
-            string_pool_bytes: string_pool.retained_bytes,
-            table_pool_bytes: table_pool.retained_bytes,
-            function_pool_bytes: function_pool.retained_bytes,
-            cclosure_pool_bytes: cclosure_pool.retained_bytes,
-            rclosure_pool_bytes: rclosure_pool.retained_bytes,
-            upvalue_pool_bytes: upvalue_pool.retained_bytes,
-            userdata_pool_bytes: userdata_pool.retained_bytes,
-            proto_pool_bytes: proto_pool.retained_bytes,
-            pool_total_slots,
-            pool_live_slots,
-            pool_free_slots,
-            pool_page_count,
-            table_cached_hash_bytes: table_alloc.hash_cached_bytes,
-            table_cached_hash_blocks: table_alloc.hash_cached_blocks,
-            table_cached_array_bytes: table_alloc.array_cached_bytes,
-            table_cached_array_blocks: table_alloc.array_cached_blocks,
-        }
     }
 }
