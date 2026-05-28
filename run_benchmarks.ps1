@@ -15,6 +15,7 @@ $benchmarks = @(
     "bench_multiret.lua",
     "bench_tailcall.lua",
 
+    "bench_gc.lua",
     "bench_tables.lua",
     "bench_table_lib.lua",
     "bench_iterators.lua",

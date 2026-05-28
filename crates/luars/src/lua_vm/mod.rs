@@ -26,7 +26,8 @@ pub mod table_builder;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
 use crate::gc::{
-    CreateResult, GcKind, GcObjectPtr, GcState, ObjectAllocator, ThreadPtr, UpvaluePtr,
+    CreateResult, GcKind, GcObjectPtr, GcProbeTrigger, GcState, ObjectAllocator, ThreadPtr,
+    UpvaluePtr,
 };
 use crate::gc::{GC, ProtoPtr};
 use crate::lua_value::lua_convert::{FromLua, IntoLua};
@@ -1279,7 +1280,7 @@ impl GlobalState {
     #[inline(always)]
     fn check_gc(&mut self, l: &mut LuaState) -> bool {
         if self.gc.gc_debt <= 0 {
-            self.gc.step(l);
+            self.gc.step_with_probe(l, GcProbeTrigger::Allocation);
             return true;
         }
 
@@ -1290,6 +1291,8 @@ impl GlobalState {
     /// Perform a full GC cycle (like luaC_fullgc in Lua 5.5)
     /// This is the internal version that can be called in emergency situations
     fn full_gc(&mut self, l: &mut LuaState, is_emergency: bool) {
+        let real_bytes_before = self.gc.get_total_bytes();
+        let start = std::time::Instant::now();
         self.gc.gc_emergency = is_emergency;
 
         // Dispatch based on GC mode (from luaC_fullgc)
@@ -1310,6 +1313,9 @@ impl GlobalState {
 
         self.object_allocator.trim_after_full_gc();
         self.gc.gc_emergency = false;
+        if !is_emergency {
+            self.gc.record_full_collect(real_bytes_before, start.elapsed());
+        }
     }
 
     /// Full GC cycle for incremental mode (like fullinc in Lua 5.5)

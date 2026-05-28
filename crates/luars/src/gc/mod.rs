@@ -52,6 +52,7 @@ pub use object_allocator::*;
 pub use paged_pool::*;
 pub use string_interner::*;
 pub use table_allocator::*;
+use std::time::{Duration, Instant};
 
 // GC Parameters (from lua.h)
 pub const MINORMUL: usize = 0; // Minor collection multiplier
@@ -325,6 +326,8 @@ pub struct GC {
     gc_error_msg: Option<String>,
 
     gc_memory_check: bool,
+
+    gc_probe: GcProbeStats,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -342,6 +345,63 @@ pub struct GcStats {
     pub promoted_objects: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcProbeTrigger {
+    Allocation,
+    ManualStep,
+    ManualCollect,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GcProbeStats {
+    pub allocation_triggers: usize,
+    pub manual_step_triggers: usize,
+    pub manual_collect_triggers: usize,
+    pub total_step_calls: usize,
+    pub inc_step_calls: usize,
+    pub young_collection_calls: usize,
+    pub full_collect_calls: usize,
+    pub total_single_step_iterations: usize,
+    pub total_step_time_ns: u128,
+    pub total_inc_step_time_ns: u128,
+    pub total_young_collection_time_ns: u128,
+    pub total_full_collect_time_ns: u128,
+    pub bytes_reclaimed_in_steps: isize,
+    pub bytes_reclaimed_in_full_collects: isize,
+    pub phase_counts: [usize; 9],
+    pub phase_time_ns: [u128; 9],
+    pub last_inc_stepsize: isize,
+    pub last_inc_work2do: isize,
+    pub last_inc_fast: bool,
+    pub last_inc_iterations: usize,
+    pub last_trigger: Option<GcProbeTrigger>,
+    pub last_kind: Option<GcKind>,
+    pub last_state_before: Option<GcState>,
+    pub last_state_after: Option<GcState>,
+    pub last_debt_before: isize,
+    pub last_debt_after: isize,
+}
+
+impl GcProbeStats {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn record_phase(&mut self, state: GcState, elapsed: Duration) {
+        let index = state as usize;
+        self.phase_counts[index] += 1;
+        self.phase_time_ns[index] += elapsed.as_nanos();
+    }
+
+    fn phase_count(&self, state: GcState) -> usize {
+        self.phase_counts[state as usize]
+    }
+
+    fn phase_time_ms(&self, state: GcState) -> f64 {
+        self.phase_time_ns[state as usize] as f64 / 1_000_000.0
+    }
+}
+
 impl GC {
     pub fn new(option: SafeOption) -> Self {
         let mut gc = GC {
@@ -355,7 +415,7 @@ impl GC {
             gc_marked: 0,
             gc_majorminor: 0,
             gc_state: GcState::Pause,
-            gc_kind: GcKind::GenMinor, // Start in generational mode like Lua 5.5
+            gc_kind: GcKind::Inc, // Lua 5.5 starts in incremental mode
             current_white: 0,
             gc_emergency: false,
             gc_stopem: false,
@@ -378,6 +438,7 @@ impl GC {
             tmp_max_memory_limit: None,
             gc_error_msg: None,
             gc_memory_check: true,
+            gc_probe: GcProbeStats::default(),
         };
 
         gc.gc_params[PAUSE] = code_param(DEFAULT_PAUSE as u32);
@@ -394,6 +455,104 @@ impl GC {
     /// This is needed because object_allocator is in LuaVM, accessed via LuaState
     fn remove_dead_string_from_intern(l: &mut LuaState, str_ptr: StringPtr) {
         l.remove_dead_string(str_ptr);
+    }
+
+    pub fn gc_probe_reset(&mut self) {
+        self.gc_probe.reset();
+    }
+
+    pub fn gc_probe_summary(&self) -> String {
+        format!(
+            "triggers: alloc={} manual_step={} manual_collect={} | calls: total_steps={} inc_steps={} young={} full_collects={} single_steps={} | time_ms: steps={:.3} inc={:.3} young={:.3} full_collects={:.3} | reclaimed_kb: steps={:.1} full_collects={:.1} | inc_budget: stepsize={} work2do={} fast={} last_iters={} | phases: pause={}({:.3}ms) prop={}({:.3}ms) enteratomic={}({:.3}ms) swpall={}({:.3}ms) swpfin={}({:.3}ms) swptbf={}({:.3}ms) swpend={}({:.3}ms) callfin={}({:.3}ms) | last: trigger={:?} kind={:?} state={:?}->{:?} debt={}->{}",
+            self.gc_probe.allocation_triggers,
+            self.gc_probe.manual_step_triggers,
+            self.gc_probe.manual_collect_triggers,
+            self.gc_probe.total_step_calls,
+            self.gc_probe.inc_step_calls,
+            self.gc_probe.young_collection_calls,
+            self.gc_probe.full_collect_calls,
+            self.gc_probe.total_single_step_iterations,
+            self.gc_probe.total_step_time_ns as f64 / 1_000_000.0,
+            self.gc_probe.total_inc_step_time_ns as f64 / 1_000_000.0,
+            self.gc_probe.total_young_collection_time_ns as f64 / 1_000_000.0,
+            self.gc_probe.total_full_collect_time_ns as f64 / 1_000_000.0,
+            self.gc_probe.bytes_reclaimed_in_steps as f64 / 1024.0,
+            self.gc_probe.bytes_reclaimed_in_full_collects as f64 / 1024.0,
+            self.gc_probe.last_inc_stepsize,
+            self.gc_probe.last_inc_work2do,
+            self.gc_probe.last_inc_fast,
+            self.gc_probe.last_inc_iterations,
+            self.gc_probe.phase_count(GcState::Pause),
+            self.gc_probe.phase_time_ms(GcState::Pause),
+            self.gc_probe.phase_count(GcState::Propagate),
+            self.gc_probe.phase_time_ms(GcState::Propagate),
+            self.gc_probe.phase_count(GcState::EnterAtomic),
+            self.gc_probe.phase_time_ms(GcState::EnterAtomic),
+            self.gc_probe.phase_count(GcState::SwpAllGc),
+            self.gc_probe.phase_time_ms(GcState::SwpAllGc),
+            self.gc_probe.phase_count(GcState::SwpFinObj),
+            self.gc_probe.phase_time_ms(GcState::SwpFinObj),
+            self.gc_probe.phase_count(GcState::SwpToBeFnz),
+            self.gc_probe.phase_time_ms(GcState::SwpToBeFnz),
+            self.gc_probe.phase_count(GcState::SwpEnd),
+            self.gc_probe.phase_time_ms(GcState::SwpEnd),
+            self.gc_probe.phase_count(GcState::CallFin),
+            self.gc_probe.phase_time_ms(GcState::CallFin),
+            self.gc_probe.last_trigger,
+            self.gc_probe.last_kind,
+            self.gc_probe.last_state_before,
+            self.gc_probe.last_state_after,
+            self.gc_probe.last_debt_before,
+            self.gc_probe.last_debt_after,
+        )
+    }
+
+    pub fn step_with_probe(&mut self, l: &mut LuaState, trigger: GcProbeTrigger) {
+        let real_bytes_before = self.get_total_bytes();
+        let state_before = self.gc_state;
+        let kind_before = self.gc_kind;
+        let debt_before = self.gc_debt;
+        let start = Instant::now();
+
+        match trigger {
+            GcProbeTrigger::Allocation => self.gc_probe.allocation_triggers += 1,
+            GcProbeTrigger::ManualStep => self.gc_probe.manual_step_triggers += 1,
+            GcProbeTrigger::ManualCollect => self.gc_probe.manual_collect_triggers += 1,
+        }
+        self.gc_probe.total_step_calls += 1;
+        self.gc_probe.last_trigger = Some(trigger);
+        self.gc_probe.last_kind = Some(kind_before);
+        self.gc_probe.last_state_before = Some(state_before);
+        self.gc_probe.last_debt_before = debt_before;
+
+        match self.gc_kind {
+            GcKind::Inc | GcKind::GenMajor => self.gc_probe.inc_step_calls += 1,
+            GcKind::GenMinor => self.gc_probe.young_collection_calls += 1,
+        }
+
+        self.step(l);
+
+        let elapsed = start.elapsed();
+        let real_bytes_after = self.get_total_bytes();
+        self.gc_probe.total_step_time_ns += elapsed.as_nanos();
+        match kind_before {
+            GcKind::Inc | GcKind::GenMajor => self.gc_probe.total_inc_step_time_ns += elapsed.as_nanos(),
+            GcKind::GenMinor => self.gc_probe.total_young_collection_time_ns += elapsed.as_nanos(),
+        }
+        self.gc_probe.bytes_reclaimed_in_steps += (real_bytes_before - real_bytes_after).max(0);
+        self.gc_probe.last_state_after = Some(self.gc_state);
+        self.gc_probe.last_debt_after = self.gc_debt;
+    }
+
+    pub fn record_full_collect(&mut self, before_real_bytes: isize, elapsed: Duration) {
+        self.gc_probe.full_collect_calls += 1;
+        self.gc_probe.total_full_collect_time_ns += elapsed.as_nanos();
+        self.gc_probe.bytes_reclaimed_in_full_collects +=
+            (before_real_bytes - self.get_total_bytes()).max(0);
+        self.gc_probe.last_trigger = Some(GcProbeTrigger::ManualCollect);
+        self.gc_probe.last_kind = Some(self.gc_kind);
+        self.gc_probe.last_state_after = Some(self.gc_state);
+        self.gc_probe.last_debt_after = self.gc_debt;
     }
 
     fn release_or_detach_object(obj: GcObjectOwner) {
@@ -628,7 +787,7 @@ impl GC {
         self.gc_debt = debt;
     }
 
-    fn get_total_bytes(&self) -> isize {
+    pub(crate) fn get_total_bytes(&self) -> isize {
         self.total_bytes - self.gc_debt
     }
 
@@ -1088,11 +1247,18 @@ impl GC {
         // l_mem work2do = applygcparam(g, STEPMUL, stepsize / cast_int(sizeof(void*)));
         let ptr_size = std::mem::size_of::<*const ()>() as isize;
         let mut work2do = self.apply_param(STEPMUL, stepsize / ptr_size);
+        let initial_work2do = work2do;
         // int fast = (work2do == 0);
         let fast = work2do == 0;
+        let mut iterations = 0;
+
+        self.gc_probe.last_inc_stepsize = stepsize;
+        self.gc_probe.last_inc_work2do = initial_work2do;
+        self.gc_probe.last_inc_fast = fast;
 
         // Repeat until enough work is done (like Lua 5.5's do-while loop)
         loop {
+            iterations += 1;
             let stres = self.single_step(l, fast);
 
             match stres {
@@ -1123,6 +1289,9 @@ impl GC {
             }
         }
 
+        self.gc_probe.last_inc_iterations = iterations;
+        self.gc_probe.total_single_step_iterations += iterations;
+
         // Set debt for next step (like Lua 5.5 incstep)
 
         if self.gc_state == GcState::Pause {
@@ -1137,6 +1306,8 @@ impl GC {
     /// Single GC step (like singlestep in Lua 5.5)
     fn single_step(&mut self, l: &mut LuaState, fast: bool) -> StepResult {
         self.gc_stopem = true;
+        let state_before = self.gc_state;
+        let start = Instant::now();
 
         let result = match self.gc_state {
             GcState::Pause => {
@@ -1208,6 +1379,7 @@ impl GC {
         };
 
         self.gc_stopem = false;
+        self.gc_probe.record_phase(state_before, start.elapsed());
         result
     }
 
@@ -2998,15 +3170,7 @@ impl GC {
     /// }
     /// ```
     fn set_minor_debt(&mut self) {
-        // Use gc_majorminor as base (number of bytes from last major collection)
-        // If not set yet, use a reasonable default
-        let base = if self.gc_majorminor > 0 {
-            self.gc_majorminor
-        } else {
-            // Use current gc_marked or a minimum base
-            self.gc_marked.max(512 * 1024) // 512KB minimum for first few collections
-        };
-        let debt = self.apply_param(MINORMUL, base);
+        let debt = self.apply_param(MINORMUL, self.gc_majorminor);
         self.set_debt(debt);
     }
 
@@ -3390,16 +3554,13 @@ impl GC {
         // - checkminormajor: if accumulated old1 bytes >= MINORMAJOR% of gc_majorminor
         //   → transition to major (via atomic2gen)
         // - Otherwise: finish minor cycle
-        let is_first_gen = self.gc_majorminor == 0;
-        if is_first_gen {
-            self.gc_majorminor = self.gc_marked; // Initialize for next cycle
-            self.finish_gen_cycle(l);
-        } else if self.check_minor_major() {
+        if self.check_minor_major() {
             // Transition to major collection like Lua 5.5's minor2inc(..., KGC_GENMAJOR):
             // merge generation lists back into allgc, enter incremental sweep,
             // and continue future steps in GenMajor until check_major_minor()
             // shifts us back to generational minor mode.
             self.change_to_incremental_mode(l, GcKind::GenMajor);
+            self.gc_marked = 0; // Match Lua 5.5 youngcollection after minor2inc
         } else {
             self.finish_gen_cycle(l); // Still in minor mode; finish it
         }
@@ -3911,7 +4072,7 @@ impl GC {
     /// }
     /// ```.
     fn really_mark_object(&mut self, l: &mut LuaState, gc_ptr: GcObjectPtr) {
-        self.gc_marked += 64; // fixed estimate; exact size unavailable from GcObjectPtr
+        self.gc_marked += gc_ptr.header().map_or(0, |header| header.size() as isize);
         if gc_ptr.is_string() {
             gc_ptr.header_mut().unwrap().make_black(); // Leaves become black immediately
         } else if gc_ptr.is_upvalue() {

@@ -103,7 +103,7 @@ pub struct NativeTable {
     /// Last free position in hash table (optimization like Lua 5.5)
     /// Points to next candidate for free slot search
     lastfree: *mut Node,
-    hash_allocator: TableAllocHandle,
+    allocator: TableAllocHandle,
 }
 
 impl NativeTable {
@@ -115,7 +115,7 @@ impl NativeTable {
             node: ptr::null_mut(),
             lsizenode: 0,
             lastfree: ptr::null_mut(),
-            hash_allocator: allocator,
+            allocator,
         };
 
         if array_cap > 0 {
@@ -142,7 +142,7 @@ impl NativeTable {
         let total_size = values_size + lenhint_size + tags_size;
 
         let start_ptr = self
-            .hash_allocator
+            .allocator
             .alloc_array_bytes(total_size, std::mem::align_of::<Value>());
         if start_ptr.is_null() {
             panic!("Failed to allocate array");
@@ -159,7 +159,7 @@ impl NativeTable {
         debug_assert_eq!(self.lsizenode, 0);
 
         let new_size = 1usize << new_lsize;
-        let new_node = self.hash_allocator.alloc_hash_nodes::<Node>(new_size);
+        let new_node = self.allocator.alloc_hash_nodes::<Node>(new_size);
         if new_node.is_null() {
             panic!("Failed to allocate hash nodes");
         }
@@ -729,7 +729,7 @@ impl NativeTable {
 
                 // array pointer points to lenhint, need to go back to start
                 let start_ptr = unsafe { self.array.sub(values_size) };
-                self.hash_allocator.free_array_bytes(
+                self.allocator.free_array_bytes(
                     start_ptr,
                     total_size,
                     std::mem::align_of::<Value>(),
@@ -750,7 +750,7 @@ impl NativeTable {
 
         // Allocate new memory — zeroed, since LUA_VNIL==0 and Value::nil()==0
         let start_ptr = self
-            .hash_allocator
+            .allocator
             .alloc_array_bytes(total_size, std::mem::align_of::<Value>());
         if start_ptr.is_null() {
             panic!("Failed to allocate array");
@@ -787,11 +787,8 @@ impl NativeTable {
             let old_values_size = old_size as usize * std::mem::size_of::<Value>();
             let old_start = unsafe { self.array.sub(old_values_size) };
             let old_total = old_values_size + lenhint_size + old_size as usize;
-            self.hash_allocator.free_array_bytes(
-                old_start,
-                old_total,
-                std::mem::align_of::<Value>(),
-            );
+            self.allocator
+                .free_array_bytes(old_start, old_total, std::mem::align_of::<Value>());
         }
 
         self.array = new_array;
@@ -832,13 +829,13 @@ impl NativeTable {
                         }
                     }
                 }
-                self.hash_allocator.free_hash_nodes(old_node, old_size);
+                self.allocator.free_hash_nodes(old_node, old_size);
             }
             return Self::hash_mem_bytes(0) - old_bytes + extra_delta;
         }
 
         // Allocate new hash array — zeroed, since Node{nil,nil,0} is all-zero bytes
-        let new_node = self.hash_allocator.alloc_hash_nodes::<Node>(new_size);
+        let new_node = self.allocator.alloc_hash_nodes::<Node>(new_size);
         if new_node.is_null() {
             panic!("Failed to allocate hash nodes");
         }
@@ -889,7 +886,7 @@ impl NativeTable {
                 }
             }
 
-            self.hash_allocator.free_hash_nodes(old_node, old_size);
+            self.allocator.free_hash_nodes(old_node, old_size);
         }
         Self::hash_mem_bytes(self.sizenode()) - old_bytes + extra_delta
     }
@@ -2125,17 +2122,14 @@ impl Drop for NativeTable {
 
             // array points to lenhint, so start is array - values_size
             let start_ptr = unsafe { self.array.sub(values_size) };
-            self.hash_allocator.free_array_bytes(
-                start_ptr,
-                total_size,
-                std::mem::align_of::<Value>(),
-            );
+            self.allocator
+                .free_array_bytes(start_ptr, total_size, std::mem::align_of::<Value>());
         }
 
         // Free hash
         let size = self.sizenode();
         if size > 0 && !self.is_dummy() {
-            self.hash_allocator.free_hash_nodes(self.node, size);
+            self.allocator.free_hash_nodes(self.node, size);
         }
     }
 }

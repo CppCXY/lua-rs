@@ -4387,28 +4387,6 @@ impl LuaState {
         vm.gc.track_resize(table_ptr, delta);
     }
 
-    #[inline]
-    pub(crate) fn check_gc(&mut self) -> LuaResult<bool> {
-        if self.global_state.gc_debt() > 0 {
-            return Ok(false);
-        }
-
-        // Run GC step with the current top. Do NOT raise top to ci_top.
-        //
-        // In C Lua 5.5, the checkGC macro works with whatever top is set by
-        // the caller. Opcodes like OP_NEWTABLE temporarily LOWER top to ra+1
-        // before checkGC, which intentionally excludes stale registers from
-        // the GC's stack scan. Raising top to ci_top would scan stale
-        // registers that may hold dead values, keeping them alive and
-        // breaking weak table clearing.
-        //
-        // traverse_thread in the atomic phase clears slots [top..stack_last]
-        // to nil, which handles any stale references above top.
-        let work = self.global_state.check_gc(self as *mut LuaState);
-
-        Ok(work)
-    }
-
     #[inline(always)]
     pub(crate) fn check_gc_in_loop(&mut self, pc: usize, c: usize, trap: &mut bool) {
         if self.global_state.gc_debt() > 0 {
