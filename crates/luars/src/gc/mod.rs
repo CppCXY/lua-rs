@@ -592,14 +592,6 @@ impl GC {
         }
     }
 
-    #[allow(unused)]
-    /// Check if GC should run (debt > 0)
-    #[inline]
-    /// Check if GC should run (like Lua 5.5: G(L)->GCdebt <= 0)
-    pub fn should_collect(&self) -> bool {
-        self.gc_debt <= 0
-    }
-
     // /*
     // ** set GCdebt to a new value keeping the real number of allocated
     // ** objects (GCtotalobjs - GCdebt) invariant and avoiding overflows in
@@ -638,24 +630,6 @@ impl GC {
         drop(obj);
     }
 
-    // Debug accessors for list lengths
-    #[allow(unused)]
-    pub fn allgc_len(&self) -> usize {
-        self.allgc.len()
-    }
-    #[allow(unused)]
-    pub fn survival_len(&self) -> usize {
-        self.survival.len()
-    }
-    #[allow(unused)]
-    pub fn old_len(&self) -> usize {
-        self.old.len()
-    }
-    #[allow(unused)]
-    pub fn fixed_len(&self) -> usize {
-        self.fixed_list.len()
-    }
-
     fn get_limit_bytes(&self) -> isize {
         if let Some(tmp_limit) = self.tmp_max_memory_limit {
             tmp_limit
@@ -669,10 +643,12 @@ impl GC {
         let current_total_bytes = self.get_total_bytes();
         self.tmp_max_memory_limit = Some(current_total_bytes.saturating_add(limit));
     }
+
     #[allow(unused)]
     pub fn temporary_memory_limit(&self) -> Option<isize> {
         self.tmp_max_memory_limit
     }
+
     #[allow(unused)]
     pub fn restore_temporary_memory_limit(&mut self, limit: Option<isize>) {
         self.tmp_max_memory_limit = limit;
@@ -732,19 +708,6 @@ impl GC {
     /// Get current GC statistics
     pub fn stats(&self) -> &GcStats {
         &self.stats
-    }
-
-    /// Enter finalizer execution mode - temporarily stop GC to prevent
-    /// objects from being collected while their finalizers are running
-    #[allow(unused)]
-    pub fn enter_finalizer_mode(&mut self) {
-        self.gc_stopem = true;
-    }
-
-    /// Exit finalizer execution mode - resume normal GC operation
-    #[allow(unused)]
-    pub fn exit_finalizer_mode(&mut self) {
-        self.gc_stopem = false;
     }
 
     /// Check if a GcPtr represents a dead object (will be collected)
@@ -2298,6 +2261,51 @@ impl GC {
         );
     }
 
+    // Helper: close an upvalue properly (matching C Lua 5.5's luaF_closethread)
+    // Must make_black + set value OLD0 to maintain GC invariant, because the
+    // upvalue may be referenced by a LIVE closure on another thread.
+    // remark_upvalues already marked the value; we just need to:
+    // 1. make the upvalue BLACK (prevent GRAY OLD upvalue from being skipped)
+    // 2. make the value G_OLD0 if upvalue is old (so sweep_gen keeps its color)
+    fn close_upvalue_proper(upval_ptr: UpvaluePtr, stack: &[LuaValue]) {
+        let gc_upval = upval_ptr.as_mut_ref();
+        if gc_upval.data.is_open() {
+            let stack_idx = gc_upval.data.get_stack_index();
+            let value = stack.get(stack_idx).copied().unwrap_or(LuaValue::nil());
+            gc_upval.data.close(value);
+
+            // Match C Lua's luaF_closethread: nw2black(uv) + luaC_barrier
+            if !gc_upval.header.is_white() {
+                gc_upval.header.make_black();
+                // If upvalue is old, make value OLD0 too (like barrier's make_old0).
+                // This prevents sweep_gen from resetting the value to
+                // G_SURVIVAL + WHITE, which would cause it to be freed
+                // even though the old upvalue references it.
+                if gc_upval.header.is_old()
+                    && let Some(value_gc) = value.as_gc_ptr()
+                    && let Some(vh) = value_gc.header_mut()
+                    && !vh.is_old()
+                {
+                    vh.make_old0();
+                }
+            }
+        }
+    }
+
+    fn process_list(list: &GcList, other_white: u8) {
+        for obj in list.iter() {
+            if let GcObjectOwner::Thread(thread_box) = obj {
+                let thread = thread_box.as_ref();
+                if thread.header.is_dead(other_white) && !thread.data.open_upvalues().is_empty() {
+                    let stack = thread.data.stack();
+                    for upval_ptr in thread.data.open_upvalues() {
+                        Self::close_upvalue_proper(*upval_ptr, stack);
+                    }
+                }
+            }
+        }
+    }
+
     /// Close open upvalues on dead threads to prevent dangling stack pointers.
     ///
     /// Called during atomic phase after white flip. At this point:
@@ -2307,68 +2315,18 @@ impl GC {
     fn close_dead_threads_upvalues(&mut self) {
         let other_white = GcHeader::otherwhite(self.current_white);
 
-        // Helper: close an upvalue properly (matching C Lua 5.5's luaF_closethread)
-        // Must make_black + set value OLD0 to maintain GC invariant, because the
-        // upvalue may be referenced by a LIVE closure on another thread.
-        // remark_upvalues already marked the value; we just need to:
-        // 1. make the upvalue BLACK (prevent GRAY OLD upvalue from being skipped)
-        // 2. make the value G_OLD0 if upvalue is old (so sweep_gen keeps its color)
-        let close_upvalue_proper = |upval_ptr: crate::gc::gc_object::UpvaluePtr,
-                                    stack: &[crate::LuaValue]| {
-            let gc_upval = upval_ptr.as_mut_ref();
-            if gc_upval.data.is_open() {
-                let stack_idx = gc_upval.data.get_stack_index();
-                let value = stack
-                    .get(stack_idx)
-                    .copied()
-                    .unwrap_or(crate::LuaValue::nil());
-                gc_upval.data.close(value);
-
-                // Match C Lua's luaF_closethread: nw2black(uv) + luaC_barrier
-                if !gc_upval.header.is_white() {
-                    gc_upval.header.make_black();
-                    // If upvalue is old, make value OLD0 too (like barrier's make_old0).
-                    // This prevents sweep_gen from resetting the value to
-                    // G_SURVIVAL + WHITE, which would cause it to be freed
-                    // even though the old upvalue references it.
-                    if gc_upval.header.is_old()
-                        && let Some(value_gc) = value.as_gc_ptr()
-                        && let Some(vh) = value_gc.header_mut()
-                        && !vh.is_old()
-                    {
-                        vh.make_old0();
-                    }
-                }
-            }
-        };
-
         // Process dead threads with open upvalues collected during remark_upvalues
         for thread_ptr in std::mem::take(&mut self.dead_threads_with_upvalues) {
             let gc_thread = thread_ptr.as_mut_ref();
             let stack = gc_thread.data.stack();
             for upval_ptr in gc_thread.data.open_upvalues() {
-                close_upvalue_proper(*upval_ptr, stack);
+                Self::close_upvalue_proper(*upval_ptr, stack);
             }
         }
 
         // Scan young lists for dead threads with open upvalues
-        let process_list = |list: &GcList| {
-            for obj in list.iter() {
-                if let GcObjectOwner::Thread(thread_box) = obj {
-                    let thread = thread_box.as_ref();
-                    if thread.header.is_dead(other_white) && !thread.data.open_upvalues().is_empty()
-                    {
-                        let stack = thread.data.stack();
-                        for upval_ptr in thread.data.open_upvalues() {
-                            close_upvalue_proper(*upval_ptr, stack);
-                        }
-                    }
-                }
-            }
-        };
-
-        process_list(&self.allgc);
-        process_list(&self.survival);
+        Self::process_list(&self.allgc, other_white);
+        Self::process_list(&self.survival, other_white);
     }
 
     fn propagate_all(&mut self, l: &mut LuaState) {
@@ -2923,6 +2881,49 @@ impl GC {
         self.set_pause();
     }
 
+    // Helper: sweep a list, freeing dead objects (respecting FINALIZEDBIT)
+    // and keeping survivors as G_OLD
+    fn sweep_full_list(
+        list: &mut GcList,
+        total_bytes: &mut isize,
+        tobefnz: &mut Vec<GcObjectPtr>,
+        l: &mut LuaState,
+        other_white: u8,
+        current_white: u8,
+    ) -> Vec<GcObjectOwner> {
+        let objects = list.take_all();
+        let mut survivors: Vec<GcObjectOwner> = Vec::new();
+
+        for gc_owner in objects {
+            let gc_ptr = gc_owner.as_gc_ptr();
+            let Some(header) = gc_ptr.header() else {
+                continue;
+            };
+
+            if header.is_dead(other_white) {
+                // BUG FIX: Check FINALIZEDBIT before freeing
+                if header.to_finalize() {
+                    gc_owner.header_mut().set_age(G_OLD);
+                    gc_owner.header_mut().make_white(current_white);
+                    tobefnz.push(gc_ptr);
+                    survivors.push(gc_owner);
+                } else {
+                    if gc_ptr.is_string() {
+                        GC::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
+                    }
+                    *total_bytes -= gc_owner.size() as isize;
+                    drop(gc_owner);
+                }
+            } else {
+                gc_owner.header_mut().set_age(G_OLD);
+                gc_owner.header_mut().make_white(current_white);
+                survivors.push(gc_owner);
+            }
+        }
+
+        survivors
+    }
+
     /// Sweep all objects in full generational GC
     /// Unlike sweep_gen (young collection), this sweeps ALL generations
     /// Dead objects are freed, survivors become G_OLD (no promotion chain)
@@ -2930,58 +2931,38 @@ impl GC {
         let other_white = 1 - self.current_white;
         let current_white = self.current_white;
 
-        // Helper: sweep a list, freeing dead objects (respecting FINALIZEDBIT)
-        // and keeping survivors as G_OLD
-        let sweep_full_list = |list: &mut GcList,
-                               total_bytes: &mut isize,
-                               tobefnz: &mut Vec<GcObjectPtr>,
-                               l: &mut LuaState|
-         -> Vec<GcObjectOwner> {
-            let objects = list.take_all();
-            let mut survivors: Vec<GcObjectOwner> = Vec::new();
-
-            for gc_owner in objects {
-                let gc_ptr = gc_owner.as_gc_ptr();
-                let Some(header) = gc_ptr.header() else {
-                    continue;
-                };
-
-                if header.is_dead(other_white) {
-                    // BUG FIX: Check FINALIZEDBIT before freeing
-                    if header.to_finalize() {
-                        gc_owner.header_mut().set_age(G_OLD);
-                        gc_owner.header_mut().make_white(current_white);
-                        tobefnz.push(gc_ptr);
-                        survivors.push(gc_owner);
-                    } else {
-                        if gc_ptr.is_string() {
-                            GC::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
-                        }
-                        *total_bytes -= gc_owner.size() as isize;
-                        drop(gc_owner);
-                    }
-                } else {
-                    gc_owner.header_mut().set_age(G_OLD);
-                    gc_owner.header_mut().make_white(current_white);
-                    survivors.push(gc_owner);
-                }
-            }
-
-            survivors
-        };
-
-        let allgc_survivors =
-            sweep_full_list(&mut self.allgc, &mut self.total_bytes, &mut self.tobefnz, l);
-        let survival_survivors = sweep_full_list(
+        let allgc_survivors = Self::sweep_full_list(
+            &mut self.allgc,
+            &mut self.total_bytes,
+            &mut self.tobefnz,
+            l,
+            other_white,
+            current_white,
+        );
+        let survival_survivors = Self::sweep_full_list(
             &mut self.survival,
             &mut self.total_bytes,
             &mut self.tobefnz,
             l,
+            other_white,
+            current_white,
         );
-        let old_survivors =
-            sweep_full_list(&mut self.old, &mut self.total_bytes, &mut self.tobefnz, l);
-        let old1_survivors =
-            sweep_full_list(&mut self.old1, &mut self.total_bytes, &mut self.tobefnz, l);
+        let old_survivors = Self::sweep_full_list(
+            &mut self.old,
+            &mut self.total_bytes,
+            &mut self.tobefnz,
+            l,
+            other_white,
+            current_white,
+        );
+        let old1_survivors = Self::sweep_full_list(
+            &mut self.old1,
+            &mut self.total_bytes,
+            &mut self.tobefnz,
+            l,
+            other_white,
+            current_white,
+        );
 
         // All survivors go to old list
         self.old.add_all(allgc_survivors);
