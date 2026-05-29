@@ -23,17 +23,6 @@ local function gc_count_kb()
     return collectgarbage("count")
 end
 
-local function maybe_gcprobe_reset()
-    pcall(collectgarbage, "probe_reset")
-end
-
-local function maybe_gcprobe_print(label)
-    local ok, summary = pcall(collectgarbage, "probe")
-    if ok and type(summary) == "string" then
-        print(label .. ": " .. summary)
-    end
-end
-
 local function build_table_garbage(count)
     for i = 1, count do
         local t = {
@@ -55,19 +44,16 @@ local function run_hash_insert(count)
     return ht
 end
 
-local function run_full_collect_probe(label)
-    maybe_gcprobe_reset()
+local function run_full_collect(label)
     local before = gc_count_kb()
     local start = os.clock()
     collectgarbage("collect")
     local elapsed = os.clock() - start
     local after = gc_count_kb()
     print(string.format("%s: %.3f seconds (%.1f KB -> %.1f KB, reclaimed %.1f KB)", label, elapsed, before, after, before - after))
-    maybe_gcprobe_print(label .. " probe")
 end
 
-local function run_step_drain_probe(label)
-    maybe_gcprobe_reset()
+local function run_step_drain(label)
     local before = gc_count_kb()
     local start = os.clock()
     local completed = false
@@ -82,7 +68,6 @@ local function run_step_drain_probe(label)
     local elapsed = os.clock() - start
     local after = gc_count_kb()
     print(string.format("%s: %.3f seconds (%d steps, completed=%s, %.1f KB -> %.1f KB, reclaimed %.1f KB)", label, elapsed, steps, tostring(completed), before, after, before - after))
-    maybe_gcprobe_print(label .. " probe")
 end
 
 print("=== GC Pressure Benchmark ===")
@@ -99,33 +84,29 @@ local pressure_kb = gc_count_kb()
 print(string.format("Build pressure with GC stopped: %.3f seconds (%.1f KB -> %.1f KB, grew %.1f KB)", build_elapsed, base_kb, pressure_kb, pressure_kb - base_kb))
 collectgarbage("restart")
 
-run_step_drain_probe("Drain pressure with collectgarbage('step')")
-run_full_collect_probe("Full collect after stepped drain")
+run_step_drain("Drain pressure with collectgarbage('step')")
+run_full_collect("Full collect after stepped drain")
 
 collectgarbage("collect")
 collectgarbage("stop")
 build_table_garbage(pressure_iters)
 collectgarbage("restart")
-maybe_gcprobe_reset()
 local before_hash_pressure = gc_count_kb()
 start = os.clock()
 local ht = run_hash_insert(hash_iters)
 local hash_pressure_elapsed = os.clock() - start
 local after_hash_pressure = gc_count_kb()
 print(string.format("Hash insert under GC pressure: %.3f seconds (%.1f KB -> %.1f KB)", hash_pressure_elapsed, before_hash_pressure, after_hash_pressure))
-maybe_gcprobe_print("Hash insert under GC pressure probe")
 
-run_full_collect_probe("Full collect after pressure-path hash insert")
+run_full_collect("Full collect after pressure-path hash insert")
 
 collectgarbage("collect")
-maybe_gcprobe_reset()
 local before_hash_collect = gc_count_kb()
 start = os.clock()
 ht = run_hash_insert(hash_iters)
 local hash_collect_elapsed = os.clock() - start
 local after_hash_collect = gc_count_kb()
 print(string.format("Hash insert after explicit collect: %.3f seconds (%.1f KB -> %.1f KB)", hash_collect_elapsed, before_hash_collect, after_hash_collect))
-maybe_gcprobe_print("Hash insert after explicit collect probe")
 
 collectgarbage("collect")
 collectgarbage("stop")

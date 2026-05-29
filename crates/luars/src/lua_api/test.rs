@@ -1420,4 +1420,36 @@ mod tests {
         assert_eq!(seq[0].a, 1);
         assert_eq!(seq[0].b, 2);
     }
+
+    #[test]
+    fn test_userdata_life_time() {
+        struct LifeTime<'a> {
+            value: &'a str,
+        }
+
+        #[derive(Clone, Debug, LuaUserData)]
+        struct LifeTimeUserdata {
+            ptr: *mut LifeTime<'static>,
+        }
+
+        #[lua_methods]
+        impl LifeTimeUserdata {
+            pub fn get_str(&self) -> String {
+                unsafe { (*self.ptr).value.to_string() }
+            }
+        }
+
+        let mut l = Lua::new(SafeOption::default());
+        let t = l.create_table().unwrap();
+        let s = "hello";
+        let lf = LifeTime { value: s };
+        let lfu = LifeTimeUserdata {
+            ptr: &lf as *const LifeTime as *mut LifeTime,
+        };
+
+        t.set(1, lfu).unwrap();
+        let seq = t.sequence_values::<LifeTimeUserdata>().unwrap();
+        assert_eq!(seq.len(), 1);
+        assert_eq!(seq[0].get_str(), "hello");
+    }
 }

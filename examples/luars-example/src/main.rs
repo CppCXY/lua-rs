@@ -7,14 +7,17 @@ struct Counter {
 
 #[lua_methods]
 impl Counter {
+    /// Create a new Counter with the given initial count.
     pub fn new(count: i64) -> Self {
         Self { count }
     }
 
+    /// Increment the counter by the given delta.
     pub fn inc(&mut self, delta: i64) {
         self.count += delta;
     }
 
+    /// Get the current count.
     pub fn get(&self) -> i64 {
         self.count
     }

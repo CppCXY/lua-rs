@@ -1,0 +1,22 @@
+[package]
+name = "luars_doc"
+version = "0.1.0"
+edition = "2024"
+description = "Generate EmmyLua/LuaLS API documentation from luars userdata Rust types"
+authors = ["CppCXY"]
+license = "MIT"
+repository = "https://github.com/CppCXY/lua-rs"
+readme = "README.md"
+keywords = ["lua", "runtime", "cli"]
+categories = ["development-tools"]
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits", "parsing"] }
+quote = "1"
+proc-macro2 = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+walkdir = "2"
+
+[lints]
+workspace = true

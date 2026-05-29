@@ -132,6 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `crates/luars_interpreter` | Standalone interpreter, tooling, and benchmark entrypoints |
 | `crates/luars_debugger` | Debugger integration |
 | `crates/luars_wasm` | WASM bindings |
+| `crates/luars_doc` | EmmyLua / LuaLS API doc generator for `#[derive(LuaUserData)]` types |
 | `benchmarks/` | Repository benchmark scripts used for performance tracking |
 | `lua_tests/` | Upstream Lua test suite used for compatibility validation |
 | `docs/` | Guides, benchmark snapshots, async notes, and user-facing docs |
@@ -155,6 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | [docs/Async.md](docs/Async.md) | Async execution and related notes |
 | [docs/Different.md](docs/Different.md) | Known differences from C Lua |
 | [crates/luars/README.md](crates/luars/README.md) | Crate-level documentation |
+| [crates/luars_doc/README.md](crates/luars_doc/README.md) | API doc generator usage |
 
 ## Validation Commands
 
