@@ -272,6 +272,13 @@ impl ObjectAllocator {
 
     pub fn trim_after_full_gc(&mut self) {
         self.table_pool.release_empty_pages();
+        self.string_pool.release_empty_pages();
         self.table_allocator.clear_cached_blocks();
+        self.cclosure_pool.release_empty_pages();
+        self.rclosure_pool.release_empty_pages();
+        self.upvalue_pool.release_empty_pages();
+        self.userdata_pool.release_empty_pages();
+        self.proto_pool.release_empty_pages();
+        self.userdata_pool.release_empty_pages();
     }
 }
