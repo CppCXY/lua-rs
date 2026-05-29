@@ -337,10 +337,11 @@ fn gen_static_wrapper_fn(self_ty: &syn::Type, method: &MethodInfo) -> proc_macro
 
 // ==================== Trait-based codegen helpers ====================
 
-/// Generate code to extract a parameter from a Lua argument using `FromLua`.
+/// Generate code to extract a parameter from a Lua argument.
 ///
-/// For `&str` parameters, generates `String` extraction then borrows.
-/// For all other types, generates a direct `FromLua::from_lua()` call.
+/// - `&str`         → extract as `String`, then borrow.
+/// - `&T` / `&mut T` → downcast from Lua userdata (for userdata reference params).
+/// - other types    → `FromLua::from_lua()`.
 fn gen_from_lua_extraction(
     name: &syn::Ident,
     ty: &syn::Type,
@@ -349,7 +350,7 @@ fn gen_from_lua_extraction(
 ) -> proc_macro2::TokenStream {
     let type_str = normalize_type(ty);
 
-    if type_str == "&str" {
+    if type_str == "&str" || type_str == "&'staticstr" {
         // &str cannot implement FromLua (not Sized + lifetime).
         // Extract as String, then the call site uses &name.
         let storage_name = format_ident!("__{}_storage", name);
@@ -361,6 +362,48 @@ fn gen_from_lua_extraction(
             };
             let #name: &str = &#storage_name;
         }
+    } else if type_str.starts_with("&mut") {
+        // &mut T → downcast userdata mutably
+        let inner_ty = strip_ref_prefix(&type_str, "&mut");
+        let inner_ty: syn::Type =
+            syn::parse_str(&inner_ty).expect("failed to parse inner type after &mut");
+        let val_name = format_ident!("__{}_val", name);
+        quote! {
+            let #val_name = __l.get_arg(#arg_index).unwrap_or(luars::LuaValue::nil());
+            let #name: &mut #inner_ty = {
+                let __ud = #val_name.as_userdata_mut()
+                    .ok_or_else(|| __l.error(format!(
+                        "bad argument #{} '{}': userdata expected, got {}",
+                        #arg_index, #param_name, #val_name.type_name()
+                    )))?;
+                __ud.downcast_mut::<#inner_ty>()
+                    .ok_or_else(|| __l.error(format!(
+                        "bad argument #{} '{}': expected {}, got {}",
+                        #arg_index, #param_name, std::any::type_name::<#inner_ty>(), __ud.type_name()
+                    )))?
+            };
+        }
+    } else if type_str.starts_with('&') {
+        // &T → downcast userdata immutably
+        let inner_ty = strip_ref_prefix(&type_str, "&");
+        let inner_ty: syn::Type =
+            syn::parse_str(&inner_ty).expect("failed to parse inner type after &");
+        let val_name = format_ident!("__{}_val", name);
+        quote! {
+            let #val_name = __l.get_arg(#arg_index).unwrap_or(luars::LuaValue::nil());
+            let #name: &#inner_ty = {
+                let __ud = #val_name.as_userdata_mut()
+                    .ok_or_else(|| __l.error(format!(
+                        "bad argument #{} '{}': userdata expected, got {}",
+                        #arg_index, #param_name, #val_name.type_name()
+                    )))?;
+                __ud.downcast_ref::<#inner_ty>()
+                    .ok_or_else(|| __l.error(format!(
+                        "bad argument #{} '{}': expected {}, got {}",
+                        #arg_index, #param_name, std::any::type_name::<#inner_ty>(), __ud.type_name()
+                    )))?
+            };
+        }
     } else {
         quote! {
             let #name: #ty = {
@@ -369,6 +412,20 @@ fn gen_from_lua_extraction(
                     .map_err(|e| __l.error(format!("bad argument #{} '{}': {}", #arg_index, #param_name, e)))?
             };
         }
+    }
+}
+
+/// Strip `&` or `&mut` and any lifetime from a normalized type string.
+///
+/// `"&'aCounter"` → `"Counter"`, `"&mutCounter"` → `"Counter"`.
+fn strip_ref_prefix(normalized: &str, prefix: &str) -> String {
+    let rest = normalized.strip_prefix(prefix).unwrap();
+    // Strip lifetime if present: "'a" prefix before the type name
+    if rest.starts_with('\'') {
+        let after_lifetime = rest.trim_start_matches(|c: char| c == '\'' || c.is_alphanumeric());
+        after_lifetime.to_string()
+    } else {
+        rest.to_string()
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "luars_debugger"
-version = "0.23.0"
+version = "0.24.0"
 edition = "2024"
 description = "Built-in debugger for luars, loaded via require('emmy_core')"
 authors = ["CppCXY"]

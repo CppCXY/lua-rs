@@ -64,6 +64,13 @@ impl Point {
             Ok(self.x / divisor)
         }
     }
+
+    /// Method taking a reference to another userdata
+    pub fn distance_to(&self, other: &Point) -> f64 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        (dx * dx + dy * dy).sqrt()
+    }
 }
 
 #[allow(unused)]
@@ -1796,4 +1803,30 @@ fn test_delegated_pow_direct_call() {
         Some(UdValue::Number(n)) => assert!((n - 8.0).abs() < 0.001),
         other => panic!("expected Some(Number(8.0)), got {:?}", other),
     }
+}
+
+// ==================== #[lua_methods] reference parameter tests ====================
+
+#[test]
+fn test_vm_method_userdata_ref_arg() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Point>("Point").unwrap();
+
+    let p1 = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Point::new(0.0, 0.0)))
+        .unwrap();
+    let p2 = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Point::new(3.0, 4.0)))
+        .unwrap();
+
+    vm.set_global("a", p1).unwrap();
+    vm.set_global("b", p2).unwrap();
+
+    // Call distance_to with another Point userdata
+    let results = vm.main_state().execute("return a:distance_to(b)").unwrap();
+    assert!((results[0].as_float().unwrap() - 5.0).abs() < 0.001);
 }
