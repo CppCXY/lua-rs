@@ -107,7 +107,7 @@ fn classify_subref_return(normalized: &str) -> Option<SubRefReturnKind> {
 
 /// Generate the push code for a sub-ref wrapped value.
 ///
-/// `ref_expr` — the expression evaluating to `&T`.
+/// `ref_expr` — the expression evaluating to `&T` or `&mut T`.
 /// `token_expr` — the expression evaluating to `RefAliveToken`.
 fn gen_subref_push_with_token(
     ref_expr: proc_macro2::TokenStream,
@@ -115,8 +115,7 @@ fn gen_subref_push_with_token(
 ) -> proc_macro2::TokenStream {
     quote! {
         {
-            let __sub = luars::SubRef::new(#ref_expr, #token_expr);
-            let __ud = luars::LuaUserdata::new(__sub);
+            let __ud = luars::LuaUserdata::from_ptr(#ref_expr as *const _, #token_expr);
             let __ud_val = __l.create_userdata(__ud)
                 .map_err(|e| __l.error(format!("{:?}", e)))?;
             __l.push_value(__ud_val)
@@ -143,8 +142,7 @@ fn gen_subref_return_expr(
             quote! {
                 match #result_expr {
                     Some(__ref) => {
-                        let __sub = luars::SubRef::new(__ref, #token_expr);
-                        let __ud = luars::LuaUserdata::new(__sub);
+                        let __ud = luars::LuaUserdata::from_ptr(__ref as *const _, #token_expr);
                         let __ud_val = __l.create_userdata(__ud)
                             .map_err(|e| __l.error(format!("{:?}", e)))?;
                         __l.push_value(__ud_val)
@@ -159,8 +157,7 @@ fn gen_subref_return_expr(
             quote! {
                 match #result_expr {
                     Ok(__ref) => {
-                        let __sub = luars::SubRef::new(__ref, #token_expr);
-                        let __ud = luars::LuaUserdata::new(__sub);
+                        let __ud = luars::LuaUserdata::from_ptr(__ref as *const _, #token_expr);
                         let __ud_val = __l.create_userdata(__ud)
                             .map_err(|e| __l.error(format!("{:?}", e)))?;
                         __l.push_value(__ud_val)
@@ -628,7 +625,7 @@ fn gen_ref_call(
         quote! {
             let __token = __self_val
                 .as_userdata_mut()
-                .and_then(|__ud| __ud.sub_guard_token())
+                .map(|__ud| __ud.sub_guard_token())
                 .unwrap_or_else(|| luars::RefAliveToken::dead());
         }
     } else {
@@ -684,7 +681,6 @@ fn gen_mut_call(
                     .as_userdata_mut()
                     .ok_or_else(|| __l.error(format!("{}:{} — userdata expected", #type_name, #method_name_str)))?;
                 __ud.sub_guard_token()
-                    .unwrap_or_else(|| luars::RefAliveToken::dead())
             };
         }
     } else {

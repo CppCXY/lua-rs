@@ -178,16 +178,6 @@ impl Lua {
         self.value_to_function(value)
     }
 
-    pub(crate) fn create_userdata_value<T: UserDataTrait + 'static>(
-        &mut self,
-        data: T,
-    ) -> LuaResult<Value> {
-        let value = self
-            .global_state_owner
-            .create_userdata(LuaUserdata::new(data))?;
-        Ok(Value::new(self.global_state_owner.to_ref(value)))
-    }
-
     /// Get a mutable reference to the underlying GlobalState for advanced use cases.
     pub fn global_state_mut(&mut self) -> &mut GlobalState {
         &mut self.global_state_owner

@@ -65,12 +65,6 @@ impl RefAliveToken {
         }
     }
 
-    /// Unwrap the inner `Rc<Cell<bool>>`. Used by `LuaUserdata::from_sub_ref`.
-    #[inline]
-    pub(crate) fn into_inner(self) -> Rc<Cell<bool>> {
-        self.inner
-    }
-
     /// Check whether the parent userdata is still alive.
     #[inline]
     pub fn is_alive(&self) -> bool {

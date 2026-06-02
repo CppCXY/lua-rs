@@ -533,7 +533,7 @@ pub fn udvalue_to_lua_value_with_token(
     parent_token: RefAliveToken,
 ) -> LuaResult<LuaValue> {
     if let UdValue::SubRef(ptr) = udv {
-        let userdata = LuaUserdata::from_ptr(ptr, parent_token);
+        let userdata = LuaUserdata::from_trait_ptr(ptr, parent_token);
         return lua_state.create_userdata(userdata);
     }
     udvalue_to_lua_value(lua_state, udv)

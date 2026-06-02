@@ -1,6 +1,7 @@
 use std::{any::Any, fmt};
 
-use crate::{LuaValue, RefAliveToken, UserDataTrait, gc::TablePtr};
+use crate::{LuaValue, RefAliveToken, UdValue, UserDataTrait, gc::TablePtr};
+use crate::lua_vm::CFunction;
 
 /// Userdata storage — either owns the data or borrows it via raw pointer.
 ///
@@ -11,25 +12,61 @@ pub enum UserdataStorage {
     Borrowed(*mut dyn UserDataTrait),
 }
 
+/// Sentinel userdata returned for expired sub-references.
+/// All methods return nil / error / unsupported.
+struct DeadUserdata;
+
+impl UserDataTrait for DeadUserdata {
+    fn type_name(&self) -> &'static str { "expired_userdata" }
+
+    fn get_field(&self, _key: &str) -> Option<UdValue> { None }
+
+    fn set_field(&mut self, _key: &str, _value: UdValue) -> Option<Result<(), String>> {
+        Some(Err("cannot modify expired sub-reference".into()))
+    }
+
+    fn lua_tostring(&self) -> Option<String> { None }
+    fn lua_eq(&self, _other: &dyn UserDataTrait) -> Option<bool> { None }
+    fn lua_lt(&self, _other: &dyn UserDataTrait) -> Option<bool> { None }
+    fn lua_le(&self, _other: &dyn UserDataTrait) -> Option<bool> { None }
+    fn lua_len(&self) -> Option<UdValue> { None }
+    fn lua_unm(&self) -> Option<UdValue> { None }
+    fn lua_bnot(&self) -> Option<UdValue> { None }
+    fn lua_add(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_sub(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_mul(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_div(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_mod(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_pow(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_idiv(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_band(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_bor(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_bxor(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_shl(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_shr(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_concat(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_call(&self) -> Option<CFunction> { None }
+    fn lua_next(&self, _control: &UdValue) -> Option<(UdValue, UdValue)> { None }
+    fn field_names(&self) -> &'static [&'static str] { &[] }
+    fn as_any(&self) -> &dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+}
+
 /// Userdata - arbitrary Rust data with optional metatable.
 ///
 /// Storage is either [`UserdataStorage::Owned`] (GC-managed) or
-/// [`UserdataStorage::Borrowed`] (raw pointer — replaces `RefUserData`).
+/// [`UserdataStorage::Borrowed`] (raw pointer, tracked by [`RefAliveToken`]).
 ///
-/// Every `LuaUserdata` carries a `sub_guard` token that can be cloned
-/// to create [`SubRef`](crate::SubRef) sub-references. When an `Owned`
-/// userdata is dropped, the guard flips to `false`, invalidating all
-/// sub-references.
+/// When an `Owned` userdata is dropped, the token flips to `false`,
+/// invalidating all borrowed sub-references that share this token.
 pub struct LuaUserdata {
     data: UserdataStorage,
     metatable: TablePtr,
-    /// Liveness token — cloned by sub-references. Flipped to false
-    /// when this userdata is dropped (only for Owned storage).
     alive_token: RefAliveToken,
 }
 
 impl LuaUserdata {
-    /// Create a new **owned** userdata. A sub-ref guard is automatically created.
+    /// Create a new **owned** userdata.
     pub fn new<T: UserDataTrait>(data: T) -> Self {
         LuaUserdata {
             data: UserdataStorage::Owned(Box::new(data)),
@@ -39,9 +76,6 @@ impl LuaUserdata {
     }
 
     /// Create an owned userdata from an already-boxed trait object.
-    ///
-    /// Used by the VM to convert `UdValue::UserdataOwned` results from
-    /// arithmetic trait methods into GC-managed userdata.
     pub fn from_boxed(data: Box<dyn UserDataTrait>) -> Self {
         LuaUserdata {
             data: UserdataStorage::Owned(data),
@@ -50,32 +84,38 @@ impl LuaUserdata {
         }
     }
 
-    /// Create a **borrowed** userdata from a mutable reference.
+    /// Create a **borrowed** userdata from a mutable reference + liveness token.
     ///
-    /// The resulting userdata forwards all field/method/metamethod access through
-    /// a raw pointer — zero overhead, no ownership transfer.
-    ///
-    /// Sub-references **cannot** be created from borrowed userdata (the guard is
-    /// permanently dead for borrowed storage).
+    /// Accesses check `token.is_alive()` before dereferencing the pointer.
     ///
     /// # Safety
-    /// The referenced object **must** outlive all Lua accesses to this userdata.
-    /// Accessing the userdata after the Rust object is dropped is **undefined behavior**.
+    /// The referenced object must outlive the token.
     #[inline]
     pub fn from_ref<T: UserDataTrait>(reference: &mut T, token: RefAliveToken) -> Self {
         LuaUserdata {
             data: UserdataStorage::Borrowed(reference as *mut T as *mut dyn UserDataTrait),
             metatable: TablePtr::null(),
-            alive_token: token, // borrowed
+            alive_token: token,
         }
     }
 
+    /// Create a borrowed userdata from a const pointer + liveness token.
     #[inline]
     pub fn from_ptr<T: UserDataTrait + 'static>(ptr: *const T, token: RefAliveToken) -> Self {
         LuaUserdata {
             data: UserdataStorage::Borrowed(ptr as *mut T as *mut dyn UserDataTrait),
             metatable: TablePtr::null(),
-            alive_token: token, // borrowed
+            alive_token: token,
+        }
+    }
+
+    /// Create a borrowed userdata from a raw trait object pointer.
+    #[inline]
+    pub fn from_trait_ptr(ptr: *const (dyn UserDataTrait + 'static), token: RefAliveToken) -> Self {
+        LuaUserdata {
+            data: UserdataStorage::Borrowed(ptr as *mut (dyn UserDataTrait + 'static)),
+            metatable: TablePtr::null(),
+            alive_token: token,
         }
     }
 
@@ -88,21 +128,39 @@ impl LuaUserdata {
         }
     }
 
-    /// Get the trait object for direct field/method/metamethod dispatch.
+    // ==================== Trait-based access (with liveness check) ====================
+
+    /// Get the trait object. For borrowed storage, returns a dead sentinel if
+    /// the token has expired.
     #[inline]
     pub fn get_trait(&self) -> &dyn UserDataTrait {
         match &self.data {
             UserdataStorage::Owned(boxed) => boxed.as_ref(),
-            UserdataStorage::Borrowed(ptr) => unsafe { &**ptr },
+            UserdataStorage::Borrowed(ptr) => {
+                if self.alive_token.is_alive() {
+                    unsafe { &**ptr }
+                } else {
+                    static DEAD: DeadUserdata = DeadUserdata;
+                    &DEAD
+                }
+            }
         }
     }
 
-    /// Get the mutable trait object.
+    /// Get the mutable trait object. For borrowed storage, returns a dead
+    /// sentinel if the token has expired.
     #[inline]
     pub fn get_trait_mut(&mut self) -> &mut dyn UserDataTrait {
         match &mut self.data {
             UserdataStorage::Owned(boxed) => boxed.as_mut(),
-            UserdataStorage::Borrowed(ptr) => unsafe { &mut **ptr },
+            UserdataStorage::Borrowed(ptr) => {
+                if self.alive_token.is_alive() {
+                    unsafe { &mut **ptr }
+                } else {
+                    // Leak a dead sentinel — ZST, minimal overhead, only on error path
+                    Box::leak(Box::new(DeadUserdata))
+                }
+            }
         }
     }
 
@@ -112,24 +170,24 @@ impl LuaUserdata {
         self.get_trait().type_name()
     }
 
-    // ==================== Sub-ref guard ====================
+    // ==================== Token access ====================
 
-    /// Clone a sub-ref token tied to this userdata's lifetime.
-    ///
-    /// Returns `None` for borrowed userdata (no sub-ref support).
+    /// Clone the liveness token (for creating sub-references).
     #[inline]
     pub fn sub_guard_token(&self) -> RefAliveToken {
         self.alive_token.clone()
     }
 
-    /// Returns `true` if this is an owned userdata (not borrowed).
+    /// Returns `true` if this is an owned userdata.
     #[inline]
     pub fn is_owned(&self) -> bool {
         matches!(self.data, UserdataStorage::Owned(_))
     }
 
+    /// Returns `true` if the backing data is still alive.
+    #[inline]
     pub fn is_alive(&self) -> bool {
-        match self.data {
+        match &self.data {
             UserdataStorage::Owned(_) => true,
             UserdataStorage::Borrowed(_) => self.alive_token.is_alive(),
         }

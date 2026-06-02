@@ -1,11 +1,10 @@
-use std::any::Any;
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::{
     Chunk, FromLua, FromLuaMulti, IntoLua, LuaError, LuaFunction, LuaResult, LuaState, LuaTable,
-    UdValue, UserDataTrait, Value,
+    LuaUserdata, RefAliveToken, UserDataTrait, Value,
 };
 
 use crate::lua_api::{Lua, LuaApi};
@@ -204,132 +203,6 @@ fn scoped_expired_error() -> &'static str {
     "scoped value is no longer available"
 }
 
-struct ScopedBorrowedUserData<T: UserDataTrait> {
-    ptr: *mut T,
-    active: Rc<Cell<bool>>,
-}
-
-impl<T: UserDataTrait> ScopedBorrowedUserData<T> {
-    fn new(reference: &mut T, active: Rc<Cell<bool>>) -> Self {
-        ScopedBorrowedUserData {
-            ptr: reference as *mut T,
-            active,
-        }
-    }
-
-    fn alive(&self) -> bool {
-        self.active.get()
-    }
-
-    #[allow(clippy::mut_from_ref)]
-    fn mutate(&self) -> Option<&mut T> {
-        if self.alive() {
-            Some(unsafe { &mut *self.ptr })
-        } else {
-            None
-        }
-    }
-}
-
-impl<T: UserDataTrait> UserDataTrait for ScopedBorrowedUserData<T> {
-    fn type_name(&self) -> &'static str {
-        if self.alive() {
-            unsafe { &*self.ptr }.type_name()
-        } else {
-            "scoped_userdata"
-        }
-    }
-
-    fn get_field(&self, key: &str) -> Option<UdValue> {
-        self.mutate()?.get_field(key)
-    }
-
-    fn set_field(&mut self, key: &str, value: UdValue) -> Option<Result<(), String>> {
-        if !self.alive() {
-            return Some(Err(scoped_expired_error().to_owned()));
-        }
-        self.mutate()?.set_field(key, value)
-    }
-
-    fn lua_tostring(&self) -> Option<String> {
-        self.mutate()?.lua_tostring()
-    }
-
-    fn lua_eq(&self, other: &dyn UserDataTrait) -> Option<bool> {
-        self.mutate()?.lua_eq(other)
-    }
-
-    fn lua_lt(&self, other: &dyn UserDataTrait) -> Option<bool> {
-        self.mutate()?.lua_lt(other)
-    }
-
-    fn lua_le(&self, other: &dyn UserDataTrait) -> Option<bool> {
-        self.mutate()?.lua_le(other)
-    }
-
-    fn lua_len(&self) -> Option<UdValue> {
-        self.mutate()?.lua_len()
-    }
-
-    fn lua_unm(&self) -> Option<UdValue> {
-        self.mutate()?.lua_unm()
-    }
-
-    fn lua_add(&self, other: &UdValue) -> Option<UdValue> {
-        self.mutate()?.lua_add(other)
-    }
-
-    fn lua_sub(&self, other: &UdValue) -> Option<UdValue> {
-        self.mutate()?.lua_sub(other)
-    }
-
-    fn lua_mul(&self, other: &UdValue) -> Option<UdValue> {
-        self.mutate()?.lua_mul(other)
-    }
-
-    fn lua_div(&self, other: &UdValue) -> Option<UdValue> {
-        self.mutate()?.lua_div(other)
-    }
-
-    fn lua_mod(&self, other: &UdValue) -> Option<UdValue> {
-        self.mutate()?.lua_mod(other)
-    }
-
-    fn lua_concat(&self, other: &UdValue) -> Option<UdValue> {
-        self.mutate()?.lua_concat(other)
-    }
-
-    fn lua_call(&self) -> Option<crate::CFunction> {
-        self.mutate()?.lua_call()
-    }
-
-    fn lua_next(&self, control: &UdValue) -> Option<(UdValue, UdValue)> {
-        self.mutate()?.lua_next(control)
-    }
-
-    fn field_names(&self) -> &'static [&'static str] {
-        match self.mutate() {
-            Some(m) => m.field_names(),
-            None => &[],
-        }
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        match self.mutate() {
-            Some(m) => m.as_any(),
-            None => self,
-        }
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        if self.alive() {
-            unsafe { &mut *self.ptr }.as_any_mut()
-        } else {
-            self
-        }
-    }
-}
-
 /// Lexical scope for non-`'static` Lua values.
 pub struct Scope<'scope, 'lua> {
     lua: &'scope mut Lua,
@@ -445,15 +318,20 @@ impl<'scope, 'lua> Scope<'scope, 'lua> {
     }
 
     /// Create borrowed userdata tied to this lexical scope.
+    ///
+    /// Uses `LuaUserdata::from_ref` internally — the scope's liveness token
+    /// is shared with the userdata. When the scope drops, the token expires
+    /// and all accesses return errors.
     pub fn create_userdata_ref<T: UserDataTrait>(
         &mut self,
         reference: &mut T,
     ) -> LuaResult<ScopedUserData<'scope, T>> {
+        let token = RefAliveToken::from_inner(self.active.clone());
         let ptr = reference as *mut T;
-        let active = self.active.clone();
-        let wrapper = ScopedBorrowedUserData::new(reference, active.clone());
-        let userdata = self.lua.create_userdata_value(wrapper)?;
-        Ok(ScopedUserData::new(userdata, ptr, active))
+        let ud = LuaUserdata::from_ref(reference, token);
+        let value = self.lua.global_state_mut().create_userdata(ud)?;
+        let userdata_value = Value::new(self.lua.global_state_mut().to_ref(value));
+        Ok(ScopedUserData::new(userdata_value, ptr, self.active.clone()))
     }
 }
 
