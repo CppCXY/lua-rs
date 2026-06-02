@@ -556,7 +556,13 @@ pub fn lua_value_to_udvalue(value: &LuaValue) -> UdValue {
         UdValue::Str(s.to_owned())
     } else if let Some(ud) = value.as_userdata_mut() {
         // Carry userdata reference so arithmetic trait methods can downcast
-        UdValue::UserdataRef(ud.get_trait().as_any() as *const dyn Any)
+        {
+            let trait_obj = match ud.get_trait() {
+                Ok(t) => t,
+                Err(_) => return UdValue::Nil,
+            };
+            UdValue::UserdataRef(trait_obj.as_any() as *const dyn Any)
+        }
     } else {
         UdValue::Nil
     }

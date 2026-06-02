@@ -283,7 +283,7 @@ fn test_lua_userdata_wrapper() {
     assert_eq!(ud.type_name(), "Point");
 
     // Trait-based field access
-    assert!(matches!(ud.get_trait().get_field("x"), Some(UdValue::Number(n)) if n == 5.0));
+    assert!(matches!(ud.get_trait().unwrap().get_field("x"), Some(UdValue::Number(n)) if n == 5.0));
 
     // Downcast access (backward compat)
     let p = ud.downcast_mut::<Point>().unwrap();
@@ -1373,7 +1373,12 @@ impl Adder {
         // arg1 = self (userdata), arg2 = value to add
         let ud = l.get_arg(1).unwrap();
         let ud_ref = ud.as_userdata_mut().unwrap();
-        let adder = ud_ref.get_trait().as_any().downcast_ref::<Adder>().unwrap();
+        let adder = ud_ref
+            .get_trait()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Adder>()
+            .unwrap();
         let base = adder.base;
 
         let val = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(0);

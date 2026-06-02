@@ -25,6 +25,20 @@ pub enum LuaError {
     /// Stack overflow while in the error-handler extra zone (C Lua's stackerror).
     /// Produces "error in error handling" without invoking any further handler.
     ErrorInErrorHandling,
+
+    /// Attempt to access a borrowed userdata whose parent has been
+    /// garbage collected or scope has ended. Static message.
+    ExpiredReference,
+}
+
+impl LuaError {
+    /// Static error message for variants that don't use vm.error_message.
+    pub fn static_message(&self) -> Option<&'static str> {
+        match self {
+            LuaError::ExpiredReference => Some("attempt to use an expired reference"),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for LuaError {
@@ -39,6 +53,7 @@ impl std::fmt::Display for LuaError {
             LuaError::Exit => write!(f, "VM Exit"),
             LuaError::CloseThread => write!(f, "Close Thread"),
             LuaError::ErrorInErrorHandling => write!(f, "Error In Error Handling"),
+            LuaError::ExpiredReference => write!(f, "Expired Reference"),
         }
     }
 }

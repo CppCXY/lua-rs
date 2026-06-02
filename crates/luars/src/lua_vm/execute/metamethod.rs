@@ -23,23 +23,27 @@ pub fn try_unary_tm(
     if tm_kind == TmKind::Unm
         && operand.ttisfulluserdata()
         && let Some(ud) = operand.as_userdata_mut()
-        && let Some(udv) = ud.get_trait().lua_unm()
     {
-        let result = udvalue_to_lua_value(lua_state, udv)?;
-        let stack = lua_state.stack_mut();
-        stack[result_pos] = result;
-        return Ok(());
+        let trait_obj = ud.get_trait()?;
+        if let Some(udv) = trait_obj.lua_unm() {
+            let result = udvalue_to_lua_value(lua_state, udv)?;
+            let stack = lua_state.stack_mut();
+            stack[result_pos] = result;
+            return Ok(());
+        }
     }
     // Try trait-based __bnot for userdata
     if tm_kind == TmKind::Bnot
         && operand.ttisfulluserdata()
         && let Some(ud) = operand.as_userdata_mut()
-        && let Some(udv) = ud.get_trait().lua_bnot()
     {
-        let result = udvalue_to_lua_value(lua_state, udv)?;
-        let stack = lua_state.stack_mut();
-        stack[result_pos] = result;
-        return Ok(());
+        let trait_obj = ud.get_trait()?;
+        if let Some(udv) = trait_obj.lua_bnot() {
+            let result = udvalue_to_lua_value(lua_state, udv)?;
+            let stack = lua_state.stack_mut();
+            stack[result_pos] = result;
+            return Ok(());
+        }
     }
 
     // Try to get metamethod from operand
@@ -108,20 +112,26 @@ pub fn try_bin_tm(
     // Try trait-based arithmetic for userdata
     if p1.ttisfulluserdata() || p2.ttisfulluserdata() {
         let trait_result = if let Some(ud) = p1.as_userdata_mut() {
+            let trait_obj = match ud.get_trait() {
+                Ok(t) => t,
+                Err(_) => {
+                    return Ok(()); /* expired */
+                }
+            };
             let other = lua_value_to_udvalue(&p2);
             Some(match tm_kind {
-                TmKind::Add => ud.get_trait().lua_add(&other),
-                TmKind::Sub => ud.get_trait().lua_sub(&other),
-                TmKind::Mul => ud.get_trait().lua_mul(&other),
-                TmKind::Div => ud.get_trait().lua_div(&other),
-                TmKind::Mod => ud.get_trait().lua_mod(&other),
-                TmKind::Pow => ud.get_trait().lua_pow(&other),
-                TmKind::IDiv => ud.get_trait().lua_idiv(&other),
-                TmKind::Band => ud.get_trait().lua_band(&other),
-                TmKind::Bor => ud.get_trait().lua_bor(&other),
-                TmKind::Bxor => ud.get_trait().lua_bxor(&other),
-                TmKind::Shl => ud.get_trait().lua_shl(&other),
-                TmKind::Shr => ud.get_trait().lua_shr(&other),
+                TmKind::Add => trait_obj.lua_add(&other),
+                TmKind::Sub => trait_obj.lua_sub(&other),
+                TmKind::Mul => trait_obj.lua_mul(&other),
+                TmKind::Div => trait_obj.lua_div(&other),
+                TmKind::Mod => trait_obj.lua_mod(&other),
+                TmKind::Pow => trait_obj.lua_pow(&other),
+                TmKind::IDiv => trait_obj.lua_idiv(&other),
+                TmKind::Band => trait_obj.lua_band(&other),
+                TmKind::Bor => trait_obj.lua_bor(&other),
+                TmKind::Bxor => trait_obj.lua_bxor(&other),
+                TmKind::Shl => trait_obj.lua_shl(&other),
+                TmKind::Shr => trait_obj.lua_shr(&other),
                 _ => None,
             })
         } else {
@@ -132,20 +142,26 @@ pub fn try_bin_tm(
             return Ok(());
         }
         let trait_result2 = if let Some(ud) = p2.as_userdata_mut() {
+            let trait_obj = match ud.get_trait() {
+                Ok(t) => t,
+                Err(_) => {
+                    return Ok(());
+                }
+            };
             let other = lua_value_to_udvalue(&p1);
             Some(match tm_kind {
-                TmKind::Add => ud.get_trait().lua_add(&other),
-                TmKind::Sub => ud.get_trait().lua_sub(&other),
-                TmKind::Mul => ud.get_trait().lua_mul(&other),
-                TmKind::Div => ud.get_trait().lua_div(&other),
-                TmKind::Mod => ud.get_trait().lua_mod(&other),
-                TmKind::Pow => ud.get_trait().lua_pow(&other),
-                TmKind::IDiv => ud.get_trait().lua_idiv(&other),
-                TmKind::Band => ud.get_trait().lua_band(&other),
-                TmKind::Bor => ud.get_trait().lua_bor(&other),
-                TmKind::Bxor => ud.get_trait().lua_bxor(&other),
-                TmKind::Shl => ud.get_trait().lua_shl(&other),
-                TmKind::Shr => ud.get_trait().lua_shr(&other),
+                TmKind::Add => trait_obj.lua_add(&other),
+                TmKind::Sub => trait_obj.lua_sub(&other),
+                TmKind::Mul => trait_obj.lua_mul(&other),
+                TmKind::Div => trait_obj.lua_div(&other),
+                TmKind::Mod => trait_obj.lua_mod(&other),
+                TmKind::Pow => trait_obj.lua_pow(&other),
+                TmKind::IDiv => trait_obj.lua_idiv(&other),
+                TmKind::Band => trait_obj.lua_band(&other),
+                TmKind::Bor => trait_obj.lua_bor(&other),
+                TmKind::Bxor => trait_obj.lua_bxor(&other),
+                TmKind::Shl => trait_obj.lua_shl(&other),
+                TmKind::Shr => trait_obj.lua_shr(&other),
                 _ => None,
             })
         } else {
@@ -537,9 +553,11 @@ pub fn try_comp_tm(
         && let Some(ud1) = p1.as_userdata_mut()
         && let Some(ud2) = p2.as_userdata_mut()
     {
+        let t1 = ud1.get_trait()?;
+        let t2 = ud2.get_trait()?;
         let result = match tm_kind {
-            TmKind::Lt => ud1.get_trait().lua_lt(ud2.get_trait()),
-            TmKind::Le => ud1.get_trait().lua_le(ud2.get_trait()),
+            TmKind::Lt => t1.lua_lt(t2),
+            TmKind::Le => t1.lua_le(t2),
             _ => None,
         };
         if let Some(b) = result {

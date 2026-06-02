@@ -475,17 +475,12 @@ fn finishget_inner(
             if t.ttisfulluserdata()
                 && let Some(ud) = t.as_userdata_mut()
             {
-                // Check for expired sub-reference
-                if let Err(msg) = ud.check_alive_or_error() {
-                    return Err(lua_state.error(msg));
-                }
+                let token = ud.sub_guard_token();
+                let trait_obj = ud.get_trait()?;
                 // Try trait-based get_field (key must be a string)
-                // This handles both field access AND method lookup
-                // (methods return UdValue::Function(cfunction))
                 if let Some(key_str) = key.as_str()
-                    && let Some(udv) = ud.get_trait().get_field(key_str)
+                    && let Some(udv) = trait_obj.get_field(key_str)
                 {
-                    let token = ud.sub_guard_token();
                     let result = udvalue_to_lua_value_with_token(lua_state, udv, token)?;
                     return Ok(Some(result));
                 }
@@ -687,12 +682,15 @@ pub(crate) fn finishset(
                 && let Some(key_str) = key.as_str()
             {
                 let udv = lua_value_to_udvalue(&value);
-                match ud.get_trait_mut().set_field(key_str, udv) {
-                    Some(Ok(())) => return Ok(true),
-                    Some(Err(msg)) => {
-                        return Err(lua_state.error(msg));
-                    }
-                    None => {} // Fall through to metatable
+                match ud.get_trait_mut() {
+                    Ok(trait_obj) => match trait_obj.set_field(key_str, udv) {
+                        Some(Ok(())) => return Ok(true),
+                        Some(Err(msg)) => {
+                            return Err(lua_state.error(msg));
+                        }
+                        None => {} // Fall through to metatable
+                    },
+                    Err(e) => return Err(e),
                 }
             }
             // Get __newindex metamethod
@@ -1140,14 +1138,16 @@ pub fn objlen(
         // Try trait-based __len for userdata first
         if value.ttisfulluserdata()
             && let Some(ud) = value.as_userdata_mut()
-            && let Some(udv) = ud.get_trait().lua_len()
         {
-            let result = udvalue_to_lua_value(l, udv)?;
-            setivalue(
-                unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
-                result.as_integer().unwrap_or(0),
-            );
-            return Ok(());
+            let trait_obj = ud.get_trait()?;
+            if let Some(udv) = trait_obj.lua_len() {
+                let result = udvalue_to_lua_value(l, udv)?;
+                setivalue(
+                    unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
+                    result.as_integer().unwrap_or(0),
+                );
+                return Ok(());
+            }
         }
     }
 
@@ -1190,7 +1190,11 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
         // Try trait-based lua_eq before metatable
         if let Some(ud1) = t1.as_userdata_mut()
             && let Some(ud2) = t2.as_userdata_mut()
-            && let Some(result) = ud1.get_trait().lua_eq(ud2.get_trait())
+            && let Some(result) = {
+                let t1 = ud1.get_trait()?;
+                let t2 = ud2.get_trait()?;
+                t1.lua_eq(t2)
+            }
         {
             return Ok(result);
         }
@@ -1605,13 +1609,11 @@ fn finishget_to_reg_inner(
             if t.ttisfulluserdata()
                 && let Some(ud) = t.as_userdata_mut()
             {
-                if let Err(msg) = ud.check_alive_or_error() {
-                    return Err(lua_state.error(msg));
-                }
+                let token = ud.sub_guard_token();
+                let trait_obj = ud.get_trait()?;
                 if let Some(key_str) = key.as_str()
-                    && let Some(udv) = ud.get_trait().get_field(key_str)
+                    && let Some(udv) = trait_obj.get_field(key_str)
                 {
-                    let token = ud.sub_guard_token();
                     let result = udvalue_to_lua_value_with_token(lua_state, udv, token)?;
                     setobj2s(lua_state, dest_reg, &result);
                     return Ok(());

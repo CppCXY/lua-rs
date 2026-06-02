@@ -13,11 +13,16 @@ pub fn normalize_type(ty: &syn::Type) -> String {
     quote!(#ty).to_string().replace(" ", "")
 }
 
+/// Check whether a normalized type is `RefAliveToken`.
+pub fn is_ref_alive_token_type(normalized: &str) -> bool {
+    normalized == "RefAliveToken" || normalized.ends_with("::RefAliveToken")
+}
+
 /// Check whether a normalized type string is a "primitive" that should
 /// use value semantics (copy/clone) rather than sub-reference.
 ///
 /// Non-primitive types (userdata types like `Vec3`, `Player`, etc.)
-/// should return sub-references when the struct has a `SubRefGuard`.
+/// should return sub-references.
 pub fn is_primitive_type(normalized: &str) -> bool {
     matches!(
         normalized,

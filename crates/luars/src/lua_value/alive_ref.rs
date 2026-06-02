@@ -1,30 +1,31 @@
-//! Sub-reference system for Lua userdata.
+//! Liveness token for borrowed userdata references.
 //!
-//! Enables userdata methods to return references to internal data (not copies),
-//! and struct fields of userdata type to yield sub-references automatically.
+//! [`RefAliveToken`] is an `Rc<Cell<bool>>` wrapper that tracks whether the
+//! backing data for a [`Borrowed`](crate::LuaUserdata) userdata is still alive.
 //!
-//! # How it works
+//! # Lifecycle
 //!
-//! 1. Every [`LuaUserdata`](crate::LuaUserdata) carries a `sub_guard: Rc<Cell<bool>>`.
-//! 2. When an owned userdata is GC-collected, its [`Drop`] flips the guard to `false`.
-//! 3. [`SubRefToken`] is a clone of the guard — each sub-reference holds one.
-//! 4. [`SubRef<T>`] wraps a raw pointer to the sub-object plus a token.
-//!    Every access checks `token.is_alive()` first.
-//! 5. The `#[derive(LuaUserData)]` macro generates `UdValue::SubRef(ptr)` for
-//!    non-primitive fields; the VM layer wraps them with the parent's token.
+//! 1. **Owned userdata** (`LuaUserdata::new`): creates an alive token on construction.
+//!    When the userdata is GC-collected, the token flips to `false`.
+//! 2. **Borrowed userdata** (`LuaUserdata::from_ptr`): shares a token created by
+//!    the parent (or a scope). When the parent is dropped, all borrowed children
+//!    see `is_alive() == false`.
+//! 3. **Scope** (`Scope::create_userdata_ref`): shares the scope's token. When the
+//!    scope ends, all scoped userdata become expired.
 //!
-//! # Example
+//! # Usage in structs
+//!
+//! Mark a field with `#[lua(ref)]` to enable `IntoLua for &T` / `IntoLua for &mut T`:
 //!
 //! ```ignore
 //! #[derive(LuaUserData)]
-//! struct Player {
-//!     pub hp: i64,
-//!     pub pos: Position,  // non-primitive → auto sub-ref
-//! }
+//! struct Entity {
+//!     pub name: String,
+//!     pub pos: Position,
 //!
-//! #[lua_methods]
-//! impl Player {
-//!     pub fn get_pos(&self) -> &Position { &self.pos }
+//!     #[lua(skip)]
+//!     #[lua(ref)]
+//!     alive: RefAliveToken,  // enables &Entity → Lua conversion
 //! }
 //! ```
 

@@ -1,61 +1,57 @@
+//! Userdata — GC-managed or borrowed Rust objects exposed to Lua.
+//!
+//! # Storage variants
+//!
+//! [`LuaUserdata`] stores data in one of two ways:
+//!
+//! | Variant | Ownership | Lifetime tracking |
+//! |---|---|---|
+//! | [`Owned`](UserdataStorage::Owned) | GC owns the data | Token flips on drop |
+//! | [`Borrowed`](UserdataStorage::Borrowed) | External / sub-reference | Token shared with parent |
+//!
+//! # Sub-references
+//!
+//! When a method returns `&T` or a field of userdata type is accessed,
+//! the result is a **borrowed** userdata — a `LuaUserdata` whose storage
+//! variant is `Borrowed`, sharing the parent's [`RefAliveToken`].
+//!
+//! All accessor methods ([`get_trait`], [`get_trait_mut`], etc.) check
+//! `is_alive()` before dereferencing. If the backing data has expired,
+//! they return [`LuaError::ExpiredReference`].
+//!
+//! # Example
+//!
+//! ```ignore
+//! #[derive(LuaUserData)]
+//! struct Entity {
+//!     pub name: String,
+//!     pub pos: Position,        // non-primitive → sub-reference on access
+//!     #[lua(skip)]
+//!     #[lua(ref)]
+//!     alive: RefAliveToken,     // enables IntoLua for &Entity
+//! }
+//! ```
+
 use std::{any::Any, fmt};
 
-use crate::{LuaValue, RefAliveToken, UdValue, UserDataTrait, gc::TablePtr};
-use crate::lua_vm::CFunction;
+use crate::lua_vm::lua_error::LuaError;
+use crate::{LuaValue, RefAliveToken, UserDataTrait, gc::TablePtr};
 
 /// Userdata storage — either owns the data or borrows it via raw pointer.
-///
-/// When `Owned`, the data lives as long as this userdata (GC-managed).
-/// When `Borrowed`, the data has an external lifetime (caller's responsibility).
 pub enum UserdataStorage {
+    /// GC-managed: the data is owned and dropped when this userdata is collected.
     Owned(Box<dyn UserDataTrait>),
+    /// Borrowed: a raw pointer to data with an external lifetime.
+    /// Validity is tracked via the [`RefAliveToken`] in [`LuaUserdata`].
     Borrowed(*mut dyn UserDataTrait),
 }
 
-/// Dead sentinel returned when accessing expired borrowed userdata.
-/// Viable as a safety net — all paths return nil/None/error.
-struct DeadUserdata;
-
-impl UserDataTrait for DeadUserdata {
-    fn type_name(&self) -> &'static str { "expired_userdata" }
-    fn get_field(&self, _key: &str) -> Option<UdValue> { None }
-    fn set_field(&mut self, _key: &str, _value: UdValue) -> Option<Result<(), String>> {
-        Some(Err("cannot modify expired sub-reference".into()))
-    }
-    fn lua_tostring(&self) -> Option<String> { None }
-    fn lua_eq(&self, _other: &dyn UserDataTrait) -> Option<bool> { None }
-    fn lua_lt(&self, _other: &dyn UserDataTrait) -> Option<bool> { None }
-    fn lua_le(&self, _other: &dyn UserDataTrait) -> Option<bool> { None }
-    fn lua_len(&self) -> Option<UdValue> { None }
-    fn lua_unm(&self) -> Option<UdValue> { None }
-    fn lua_bnot(&self) -> Option<UdValue> { None }
-    fn lua_add(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_sub(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_mul(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_div(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_mod(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_pow(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_idiv(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_band(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_bor(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_bxor(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_shl(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_shr(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_concat(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_call(&self) -> Option<CFunction> { None }
-    fn lua_next(&self, _control: &UdValue) -> Option<(UdValue, UdValue)> { None }
-    fn field_names(&self) -> &'static [&'static str] { &[] }
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
-}
-
-/// Userdata - arbitrary Rust data with optional metatable.
+/// GC-managed userdata — the bridge between Rust types and Lua values.
 ///
-/// Storage is either [`UserdataStorage::Owned`] (GC-managed) or
-/// [`UserdataStorage::Borrowed`] (raw pointer, tracked by [`RefAliveToken`]).
-///
-/// When an `Owned` userdata is dropped, the token flips to `false`,
-/// invalidating all borrowed sub-references that share this token.
+/// Every `LuaUserdata` carries an [`RefAliveToken`]. For `Owned` storage,
+/// the token starts alive and flips to `false` when the userdata is dropped.
+/// All accessor methods return [`LuaError::ExpiredReference`] if the token
+/// has expired.
 pub struct LuaUserdata {
     data: UserdataStorage,
     metatable: TablePtr,
@@ -63,6 +59,8 @@ pub struct LuaUserdata {
 }
 
 impl LuaUserdata {
+    // ==================== Constructors ====================
+
     /// Create a new **owned** userdata.
     pub fn new<T: UserDataTrait>(data: T) -> Self {
         LuaUserdata {
@@ -82,12 +80,6 @@ impl LuaUserdata {
     }
 
     /// Create a **borrowed** userdata from a mutable reference + liveness token.
-    ///
-    /// Accesses check `token.is_alive()` before dereferencing the pointer.
-    ///
-    /// # Safety
-    /// The referenced object must outlive the token.
-    #[inline]
     pub fn from_ref<T: UserDataTrait>(reference: &mut T, token: RefAliveToken) -> Self {
         LuaUserdata {
             data: UserdataStorage::Borrowed(reference as *mut T as *mut dyn UserDataTrait),
@@ -97,8 +89,7 @@ impl LuaUserdata {
     }
 
     /// Create a borrowed userdata from a const pointer + liveness token.
-    #[inline]
-    pub fn from_ptr<T: UserDataTrait + 'static>(ptr: *const T, token: RefAliveToken) -> Self {
+    pub fn from_ptr<T: UserDataTrait>(ptr: *const T, token: RefAliveToken) -> Self {
         LuaUserdata {
             data: UserdataStorage::Borrowed(ptr as *mut T as *mut dyn UserDataTrait),
             metatable: TablePtr::null(),
@@ -107,7 +98,6 @@ impl LuaUserdata {
     }
 
     /// Create a borrowed userdata from a raw trait object pointer.
-    #[inline]
     pub fn from_trait_ptr(ptr: *const (dyn UserDataTrait + 'static), token: RefAliveToken) -> Self {
         LuaUserdata {
             data: UserdataStorage::Borrowed(ptr as *mut (dyn UserDataTrait + 'static)),
@@ -125,75 +115,7 @@ impl LuaUserdata {
         }
     }
 
-    // ==================== Trait-based access ====================
-
-    /// Get the trait object. For expired borrowed userdata, returns a dead
-    /// sentinel that yields nil/None for all operations.
-    ///
-    /// Callers should prefer `check_alive_or_error()` for explicit error messages
-    /// at key entry points.
-    #[inline]
-    pub fn get_trait(&self) -> &dyn UserDataTrait {
-        match &self.data {
-            UserdataStorage::Owned(boxed) => boxed.as_ref(),
-            UserdataStorage::Borrowed(ptr) => {
-                if self.alive_token.is_alive() {
-                    unsafe { &**ptr }
-                } else {
-                    static DEAD: DeadUserdata = DeadUserdata;
-                    &DEAD
-                }
-            }
-        }
-    }
-
-    /// Get the mutable trait object. For expired borrowed userdata, returns a
-    /// dead sentinel.
-    #[inline]
-    pub fn get_trait_mut(&mut self) -> &mut dyn UserDataTrait {
-        match &mut self.data {
-            UserdataStorage::Owned(boxed) => boxed.as_mut(),
-            UserdataStorage::Borrowed(ptr) => {
-                if self.alive_token.is_alive() {
-                    unsafe { &mut **ptr }
-                } else {
-                    // Leak is acceptable — only on error path, ZST
-                    Box::leak(Box::new(DeadUserdata))
-                }
-            }
-        }
-    }
-
-    /// Returns `Ok(())` if this userdata is safe to access, or an error
-    /// with a descriptive message if the backing data has expired.
-    #[inline]
-    pub fn check_alive_or_error(&self) -> Result<(), String> {
-        if !self.is_alive() {
-            Err("attempt to use an expired reference — the owning userdata has been garbage collected".into())
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Get the type name from the trait.
-    #[inline]
-    pub fn type_name(&self) -> &'static str {
-        self.get_trait().type_name()
-    }
-
-    // ==================== Token access ====================
-
-    /// Clone the liveness token (for creating sub-references).
-    #[inline]
-    pub fn sub_guard_token(&self) -> RefAliveToken {
-        self.alive_token.clone()
-    }
-
-    /// Returns `true` if this is an owned userdata.
-    #[inline]
-    pub fn is_owned(&self) -> bool {
-        matches!(self.data, UserdataStorage::Owned(_))
-    }
+    // ==================== Liveness ====================
 
     /// Returns `true` if the backing data is still alive.
     #[inline]
@@ -204,28 +126,71 @@ impl LuaUserdata {
         }
     }
 
-    // ==================== Backward-compatible downcast access ====================
+    /// Clone the liveness token (for creating sub-references).
+    #[inline]
+    pub fn sub_guard_token(&self) -> RefAliveToken {
+        self.alive_token.clone()
+    }
 
-    /// Downcast to a concrete type (immutable).
+    // ==================== Trait-based access ====================
+
+    /// Get the trait object. Returns `Err(ExpiredReference)` if this is a
+    /// borrowed userdata whose token has expired.
+    #[inline]
+    pub fn get_trait(&self) -> Result<&dyn UserDataTrait, LuaError> {
+        if !self.is_alive() {
+            return Err(LuaError::ExpiredReference);
+        }
+        Ok(match &self.data {
+            UserdataStorage::Owned(boxed) => boxed.as_ref(),
+            UserdataStorage::Borrowed(ptr) => unsafe { &**ptr },
+        })
+    }
+
+    /// Get the mutable trait object. Returns `Err(ExpiredReference)` if this
+    /// is a borrowed userdata whose token has expired.
+    #[inline]
+    pub fn get_trait_mut(&mut self) -> Result<&mut dyn UserDataTrait, LuaError> {
+        if !self.is_alive() {
+            return Err(LuaError::ExpiredReference);
+        }
+        Ok(match &mut self.data {
+            UserdataStorage::Owned(boxed) => boxed.as_mut(),
+            UserdataStorage::Borrowed(ptr) => unsafe { &mut **ptr },
+        })
+    }
+
+    /// Get the type name. Returns `"expired_userdata"` if expired.
+    #[inline]
+    pub fn type_name(&self) -> &'static str {
+        match self.get_trait() {
+            Ok(t) => t.type_name(),
+            Err(_) => "expired_userdata",
+        }
+    }
+
+    // ==================== Downcast ====================
+
+    /// Downcast to a concrete type. Returns `None` if expired or type mismatch.
     #[inline]
     pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
-        self.get_trait().as_any().downcast_ref::<T>()
+        self.get_trait().ok()?.as_any().downcast_ref::<T>()
     }
 
     /// Downcast to a concrete type (mutable).
     #[inline]
     pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
-        self.get_trait_mut().as_any_mut().downcast_mut::<T>()
+        self.get_trait_mut().ok()?.as_any_mut().downcast_mut::<T>()
     }
 
-    /// Get raw `&dyn Any` reference (backward compatibility).
-    pub fn get_data(&self) -> &dyn Any {
-        self.get_trait().as_any()
+    /// Get raw `&dyn Any` reference.
+    pub fn get_data(&self) -> Result<&dyn Any, LuaError> {
+        Ok(self.get_trait()?.as_any())
     }
 
-    /// Get raw `&mut dyn Any` reference (backward compatibility).
-    pub fn get_data_mut(&mut self) -> &mut dyn Any {
-        self.get_trait_mut().as_any_mut()
+    /// Get raw `&mut dyn Any` reference.
+    pub fn get_data_mut(&mut self) -> Result<&mut dyn Any, LuaError> {
+        Ok(self.get_trait_mut()?.as_any_mut())
     }
 
     // ==================== Metatable ====================
@@ -243,11 +208,6 @@ impl LuaUserdata {
             self.metatable = table_ptr;
         } else if metatable.is_nil() {
             self.metatable = TablePtr::null();
-        } else {
-            debug_assert!(
-                false,
-                "Attempted to set userdata metatable to non-table, non-nil value"
-            );
         }
     }
 }
@@ -255,8 +215,6 @@ impl LuaUserdata {
 impl Drop for LuaUserdata {
     fn drop(&mut self) {
         if let UserdataStorage::Owned(_) = &self.data {
-            // Flip the guard first — the Box is dropped afterwards (fields
-            // are dropped in declaration order: data, metatable, sub_guard).
             self.alive_token.set(false);
         }
     }
@@ -264,11 +222,14 @@ impl Drop for LuaUserdata {
 
 impl fmt::Debug for LuaUserdata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Userdata({}@{:p})",
-            self.get_trait().type_name(),
-            self.get_trait().as_any() as *const dyn Any
-        )
+        match self.get_trait() {
+            Ok(trait_obj) => write!(
+                f,
+                "Userdata({}@{:p})",
+                trait_obj.type_name(),
+                trait_obj.as_any() as *const dyn Any
+            ),
+            Err(_) => write!(f, "Userdata(expired)"),
+        }
     }
 }

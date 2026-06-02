@@ -216,6 +216,38 @@ impl Point {
 
 > **Runnable example:** See `Vec2` in [`examples/luars-example/src/main.rs`](../../examples/luars-example/src/main.rs) — `example_vec2()`
 
+## Sub-Reference Returns
+
+Methods returning `&T` or `&mut T` are automatically wrapped as **borrowed userdata** (sub-references) that share the parent's lifetime:
+
+```rust
+#[lua_methods]
+impl Entity {
+    /// Returns an immutable sub-reference to internal data
+    pub fn get_pos(&self) -> &Position { &self.pos }
+
+    /// Returns a mutable sub-reference
+    pub fn get_pos_mut(&mut self) -> &mut Position { &mut self.pos }
+}
+```
+
+```lua
+local p = entity:get_pos()   -- sub-reference, not a copy
+p:translate(10, 20)          -- mutates entity.pos directly
+```
+
+The following return types are auto-detected and wrapped as sub-references:
+
+| Return Type | Behavior |
+|---|---|
+| `&T` | Borrowed userdata, shares parent's `RefAliveToken` |
+| `&mut T` | Same, with mutable access |
+| `Option<&T>` | `Some` → sub-ref, `None` → nil |
+| `Result<&T, E>` | `Ok` → sub-ref, `Err` → Lua error |
+| `Option<&mut T>` / `Result<&mut T, E>` | Same pattern |
+
+> **Requirement:** The struct must have a non-pub `RefAliveToken` field, from which the token is auto-cloned during wrapping.
+
 ## Next
 
 - [register_type](RegisterType.md) — how to register associated functions in the Lua global table

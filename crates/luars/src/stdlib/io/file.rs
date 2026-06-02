@@ -811,7 +811,9 @@ fn file_read(l: &mut LuaState) -> LuaResult<usize> {
 
     // Extract LuaFile from userdata using direct pointer access
     if let Some(ud) = file_val.as_userdata_mut() {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             let read_result = super::read_many_formats_file(l, lua_file, &formats)?;
             return super::push_read_results(l, read_result);
@@ -830,7 +832,9 @@ fn file_write(l: &mut LuaState) -> LuaResult<usize> {
 
     // Extract LuaFile from userdata using direct pointer access
     if let Some(ud) = file_val.as_userdata_mut() {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             // Write all arguments (starting from arg 2)
             let mut i = 2;
@@ -891,7 +895,9 @@ fn file_flush(l: &mut LuaState) -> LuaResult<usize> {
 
     // Extract LuaFile from userdata using direct pointer access
     if let Some(ud) = file_val.as_userdata_mut() {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             if let Err(e) = lua_file.flush() {
                 // Return nil, errmsg, errno (like C Lua)
@@ -921,7 +927,9 @@ fn file_gc_close(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     if let Some(ud) = file_val.as_userdata_mut() {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             if !lua_file.is_closed() && !lua_file.is_std_stream() {
                 let _ = lua_file.close_with_result();
@@ -947,7 +955,9 @@ fn file_close(l: &mut LuaState) -> LuaResult<usize> {
 
     // Extract LuaFile from userdata using direct pointer access
     if let Some(ud) = file_val.as_userdata_mut() {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             // Cannot close already-closed files
             if lua_file.is_closed() {
@@ -1001,7 +1011,9 @@ fn file_tostring(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("expected file handle".to_string()))?;
 
     if let Some(ud) = file_val.as_userdata_mut() {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             let s = if lua_file.is_closed() {
                 "file (closed)".to_string()
@@ -1084,7 +1096,9 @@ fn file_seek(l: &mut LuaState) -> LuaResult<usize> {
     let offset = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(0);
 
     if let Some(ud) = file_val.as_userdata_mut() {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             let seek_from = match whence.as_str() {
                 "set" => std::io::SeekFrom::Start(offset.max(0) as u64),

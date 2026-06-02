@@ -25,12 +25,15 @@ use quote::quote;
 use syn::{Data, DeriveInput, Fields, Ident, Meta};
 
 use crate::type_utils::{
-    field_to_udvalue, is_primitive_type, normalize_type, ref_to_udvalue, udvalue_to_field,
+    field_to_udvalue, is_primitive_type, is_ref_alive_token_type, normalize_type, ref_to_udvalue,
+    udvalue_to_field,
 };
 
-fn gen_lua_convert_impls(name: &Ident) -> proc_macro2::TokenStream {
-    quote! {
-        // Owned value → owned userdata
+fn gen_lua_convert_impls(
+    name: &Ident,
+    ref_token_field: Option<&Ident>,
+) -> proc_macro2::TokenStream {
+    let owned_impl = quote! {
         impl luars::IntoLua for #name {
             fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
                 let userdata = state
@@ -40,37 +43,39 @@ fn gen_lua_convert_impls(name: &Ident) -> proc_macro2::TokenStream {
                 Ok(1)
             }
         }
+    };
 
-        // Reference → borrowed userdata (uses a standalone alive token;
-        // the caller must ensure the reference outlives Lua access)
-        impl luars::IntoLua for &#name {
-            fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
-                let ud = luars::LuaUserdata::from_ptr(
-                    self as *const #name,
-                    luars::RefAliveToken::default(),
-                );
-                let userdata = state
-                    .create_userdata(ud)
-                    .map_err(|e| format!("{:?}", e))?;
-                state.push_value(userdata).map_err(|e| format!("{:?}", e))?;
-                Ok(1)
+    let ref_impls = ref_token_field.map(|field| {
+        quote! {
+            impl luars::IntoLua for &#name {
+                fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
+                    let token = self.#field.clone();
+                    let ud = luars::LuaUserdata::from_ptr(self as *const #name, token);
+                    let userdata = state
+                        .create_userdata(ud)
+                        .map_err(|e| format!("{:?}", e))?;
+                    state.push_value(userdata).map_err(|e| format!("{:?}", e))?;
+                    Ok(1)
+                }
+            }
+
+            impl luars::IntoLua for &mut #name {
+                fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
+                    let token = self.#field.clone();
+                    let ud = luars::LuaUserdata::from_ptr(self as *const #name, token);
+                    let userdata = state
+                        .create_userdata(ud)
+                        .map_err(|e| format!("{:?}", e))?;
+                    state.push_value(userdata).map_err(|e| format!("{:?}", e))?;
+                    Ok(1)
+                }
             }
         }
+    });
 
-        // Mutable reference → borrowed userdata
-        impl luars::IntoLua for &mut #name {
-            fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
-                let ud = luars::LuaUserdata::from_ptr(
-                    self as *const #name,
-                    luars::RefAliveToken::default(),
-                );
-                let userdata = state
-                    .create_userdata(ud)
-                    .map_err(|e| format!("{:?}", e))?;
-                state.push_value(userdata).map_err(|e| format!("{:?}", e))?;
-                Ok(1)
-            }
-        }
+    quote! {
+        #owned_impl
+        #ref_impls
     }
 }
 
@@ -140,6 +145,7 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
     // Collect field info
     let mut field_infos: Vec<FieldInfo> = Vec::new();
     let mut iter_field: Option<IterFieldInfo> = None;
+    let mut ref_token_field: Option<Ident> = None;
     for field in fields.iter() {
         let ident = field.ident.as_ref().unwrap();
         let ty = &field.ty;
@@ -170,6 +176,25 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
                     }
                     Ok(())
                 });
+            }
+        }
+
+        // Auto-detect the RefAliveToken field for IntoLua<&T> support.
+        // Must be non-pub — RefAliveToken is internal tracking state.
+        if !is_pub {
+            let type_str = normalize_type(ty);
+            if is_ref_alive_token_type(&type_str) {
+                if ref_token_field.is_some() {
+                    return syn::Error::new_spanned(
+                        ident,
+                        "only one RefAliveToken field is allowed per struct",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+                ref_token_field = Some(ident.clone());
+                // Non-pub RefAliveToken fields are automatically skipped
+                skip = true;
             }
         }
 
@@ -307,7 +332,7 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
     };
 
     let type_name_str = name.to_string();
-    let lua_convert_impls = gen_lua_convert_impls(name);
+    let lua_convert_impls = gen_lua_convert_impls(name, ref_token_field.as_ref());
 
     let expanded = quote! {
         impl luars::UserDataTrait for #name {
@@ -585,7 +610,7 @@ fn gen_minimal_impl(name: &Ident, trait_impls: &[String], delegates: &LuaDelegat
     let type_name_str = name.to_string();
     let metamethod_impls = gen_metamethods(name, trait_impls);
     let delegate_impls = gen_delegate_methods(delegates);
-    let lua_convert_impls = gen_lua_convert_impls(name);
+    let lua_convert_impls = gen_lua_convert_impls(name, None::<&Ident>);
 
     let expanded = quote! {
         impl luars::UserDataTrait for #name {

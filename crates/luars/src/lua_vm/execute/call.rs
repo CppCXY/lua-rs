@@ -61,7 +61,8 @@ pub fn resolve_call_chain(
         // Try userdata lua_call trait method first
         if func.ttisfulluserdata()
             && let Some(ud) = func.as_userdata_mut()
-            && let Some(call_fn) = ud.get_trait().lua_call()
+            && let Ok(trait_obj) = ud.get_trait()
+            && let Some(call_fn) = trait_obj.lua_call()
         {
             current_arg_count = insert_callable_before_args(
                 lua_state,

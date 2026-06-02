@@ -1177,7 +1177,9 @@ impl LuaState {
                     .get_mut(tbc_idx)
                     .and_then(|v| v.as_userdata_mut())
             {
-                ud_mut.get_trait_mut().lua_close();
+                if let Ok(trait_obj) = ud_mut.get_trait_mut() {
+                    trait_obj.lua_close();
+                }
                 continue;
             }
 
@@ -1300,7 +1302,9 @@ impl LuaState {
                     .get_mut(tbc_idx)
                     .and_then(|v| v.as_userdata_mut())
             {
-                ud_mut.get_trait_mut().lua_close();
+                if let Ok(trait_obj) = ud_mut.get_trait_mut() {
+                    trait_obj.lua_close();
+                }
                 continue;
             }
 
@@ -2775,6 +2779,9 @@ impl LuaState {
     }
 
     pub fn get_error_msg(&mut self, e: LuaError) -> String {
+        if let Some(msg) = e.static_message() {
+            return msg.to_string();
+        }
         match e {
             LuaError::OutOfMemory => {
                 format!(
@@ -4614,7 +4621,8 @@ impl LuaState {
                 // Check for trait-based __tostring on userdata
                 if value.ttisfulluserdata()
                     && let Some(ud) = value.as_userdata_mut()
-                    && let Some(s) = ud.get_trait().lua_tostring()
+                    && let Ok(trait_obj) = ud.get_trait()
+                    && let Some(s) = trait_obj.lua_tostring()
                 {
                     return Ok(s);
                 }

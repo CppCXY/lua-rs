@@ -239,7 +239,9 @@ fn io_write(l: &mut LuaState) -> LuaResult<usize> {
 
     // Get the file from userdata
     if let Some(ud) = file_handle.as_userdata_mut() {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             if lua_file.is_closed() {
                 return Err(l.error("default output file is closed".to_string()));
@@ -283,7 +285,9 @@ fn io_read(l: &mut LuaState) -> LuaResult<usize> {
     let file_handle = get_default_input(l)?;
 
     if let Some(ud) = file_handle.as_userdata_mut() {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             if lua_file.is_closed() {
                 return Err(l.error("default input file is closed".to_string()));
@@ -425,7 +429,9 @@ fn io_flush(l: &mut LuaState) -> LuaResult<usize> {
     let file_handle = get_default_output(l)?;
 
     if let Some(ud) = file_handle.as_userdata_mut() {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             if let Err(e) = lua_file.flush() {
                 // Return nil, errmsg, errno (like C Lua)
@@ -714,7 +720,9 @@ fn io_lines_call_inner(l: &mut LuaState, state_val: &LuaValue) -> LuaResult<usiz
     let fmts_table = l.raw_get(state_val, &fmts_key).unwrap_or_default();
 
     if let Some(ud) = file_val.as_userdata_mut() {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             if nfmts == 0 {
                 // Default: read a line
@@ -824,7 +832,9 @@ fn io_input(l: &mut LuaState) -> LuaResult<usize> {
         } else if arg_val.is_userdata() {
             // Verify it's a valid file handle
             if let Some(ud) = arg_val.as_userdata_mut() {
-                let data = ud.get_data_mut();
+                let Ok(data) = ud.get_data_mut() else {
+                    return Err(l.error("attempt to use an expired file handle".to_string()));
+                };
                 if data.downcast_ref::<LuaFile>().is_none() {
                     return Err(crate::stdlib::debug::arg_typeerror(l, 1, "FILE*", &arg_val));
                 }
@@ -886,7 +896,9 @@ fn io_output(l: &mut LuaState) -> LuaResult<usize> {
         } else if arg_val.is_userdata() {
             // Verify it's a valid file handle
             if let Some(ud) = arg_val.as_userdata_mut() {
-                let data = ud.get_data_mut();
+                let Ok(data) = ud.get_data_mut() else {
+                    return Err(l.error("attempt to use an expired file handle".to_string()));
+                };
                 if data.downcast_ref::<LuaFile>().is_none() {
                     return Err(l.error("bad argument #1 to 'output' (file expected)".to_string()));
                 }
@@ -917,7 +929,9 @@ fn io_type(l: &mut LuaState) -> LuaResult<usize> {
     if let Some(val) = obj
         && let Some(ud) = val.as_userdata_mut()
     {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_ref::<LuaFile>() {
             if lua_file.is_closed() {
                 let result = l.create_string("closed file")?;
@@ -1006,7 +1020,9 @@ fn io_close(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     let close_result = if let Some(ud) = file_val.as_userdata_mut() {
-        let data = ud.get_data_mut();
+        let Ok(data) = ud.get_data_mut() else {
+            return Err(l.error("attempt to use an expired file handle".to_string()));
+        };
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             // Cannot close already-closed files
             if lua_file.is_closed() {

@@ -226,7 +226,53 @@ impl std::ops::Not for Flags {
 | `bool` | boolean | read/write supported |
 | `String` | string | cloned on read, converted from Lua string on write |
 
-Other types can exist in the struct but should be marked with `#[lua(skip)]`, or the type must implement `Into<UdValue>`.
+### Non-primitive fields — sub-references
+
+Fields whose types also implement `UserDataTrait` (e.g. another struct with `#[derive(LuaUserData)]`) are **not copied** on access. Instead, a **borrowed sub-reference** is returned — a Lua userdata that shares the parent's lifetime.
+
+```rust
+#[derive(LuaUserData)]
+struct Position { pub x: f64, pub y: f64 }
+
+#[derive(LuaUserData)]
+struct Entity {
+    pub name: String,
+    pub pos: Position,   // ← returns a sub-reference, NOT a copy
+}
+```
+
+```lua
+local p = entity.pos     -- sub-reference to entity's Position data
+print(p.x, p.y)           -- reads directly from entity.pos
+p.x = 99                  -- writes directly to entity.pos
+```
+
+When the parent (`Entity`) is garbage collected, all sub-references become expired. Accessing an expired sub-reference returns a Lua error: *"attempt to use an expired reference"*.
+
+### `RefAliveToken` — enabling `IntoLua for &T`
+
+To convert a reference `&T` or `&mut T` into a Lua value, add a **non-pub** `RefAliveToken` field. The derive macro auto-detects it:
+
+```rust
+#[derive(LuaUserData)]
+struct Entity {
+    pub name: String,
+    pub pos: Position,
+
+    alive: RefAliveToken,  // non-pub → auto-detected
+    //     ^^^^^^^^^^^^^^ enables IntoLua for &Entity and &mut Entity
+}
+```
+
+The derive generates:
+
+| `IntoLua` impl | Storage | Token |
+|---|---|---|
+| `IntoLua for Entity` | `Owned` | new, alive |
+| `IntoLua for &Entity` | `Borrowed` | clones from `self.alive` |
+| `IntoLua for &mut Entity` | `Borrowed` | clones from `self.alive` |
+
+> **Note:** `RefAliveToken` must be **non-pub** — it's internal tracking state, not exposed to Lua. The derive auto-skips non-pub fields and auto-detects the token field.
 
 ## Generated Code
 

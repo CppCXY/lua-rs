@@ -610,7 +610,9 @@ fn lua_userdata_next(l: &mut LuaState) -> LuaResult<usize> {
     // Convert the Lua control variable to UdValue for the trait call
     let control = lua_value_to_udvalue(&key_val);
 
-    match ud.get_trait().lua_next(&control) {
+    let trait_obj = ud.get_trait()?;
+
+    match trait_obj.lua_next(&control) {
         Some((next_control, value)) => {
             let k = udvalue_to_lua_value(l, next_control)?;
             let v = udvalue_to_lua_value(l, value)?;
