@@ -62,7 +62,7 @@ pub use lua_vm::{
 pub use lua_vm::{LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET};
 pub use stdlib::Stdlib;
 
-#[cfg(feature = "send")]
+#[cfg(feature = "unsafe-send")]
 mod send_impls {
     use crate::RefAliveToken;
     use crate::lua_api::Lua;
