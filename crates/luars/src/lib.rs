@@ -61,3 +61,43 @@ pub use lua_vm::{
 };
 pub use lua_vm::{LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET};
 pub use stdlib::Stdlib;
+
+#[cfg(feature = "send")]
+mod send_impls {
+    use crate::RefAliveToken;
+    use crate::lua_api::Lua;
+    use crate::lua_value::LuaValue;
+    use crate::lua_vm::{
+        GlobalState, LuaAnyRef, LuaFunctionRef, LuaState, LuaStringRef, LuaTableRef, UserDataRef,
+    };
+
+    unsafe impl Send for GlobalState {}
+    unsafe impl Sync for GlobalState {}
+
+    unsafe impl Send for LuaState {}
+    unsafe impl Sync for LuaState {}
+
+    unsafe impl Send for Lua {}
+    unsafe impl Sync for Lua {}
+
+    unsafe impl Send for LuaValue {}
+    unsafe impl Sync for LuaValue {}
+
+    unsafe impl Send for RefAliveToken {}
+    unsafe impl Sync for RefAliveToken {}
+
+    unsafe impl<T: 'static> Send for UserDataRef<T> {}
+    unsafe impl<T: 'static> Sync for UserDataRef<T> {}
+
+    unsafe impl Send for LuaTableRef {}
+    unsafe impl Sync for LuaTableRef {}
+
+    unsafe impl Send for LuaFunctionRef {}
+    unsafe impl Sync for LuaFunctionRef {}
+
+    unsafe impl Send for LuaAnyRef {}
+    unsafe impl Sync for LuaAnyRef {}
+
+    unsafe impl Send for LuaStringRef {}
+    unsafe impl Sync for LuaStringRef {}
+}

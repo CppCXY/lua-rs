@@ -19,6 +19,12 @@ serde = ["dep:serde", "dep:serde_json"]
 sandbox = []
 shared-proto = []
 
+# Opt-in: marks core VM types as `Send` + `Sync` via `unsafe impl`.
+# SAFETY: the caller must ensure no concurrent access — the VM is
+# still single-threaded internally (Rc, raw pointers, etc.). This
+# flag exists purely to satisfy framework bounds (e.g. axum, tokio).
+send = []
+
 [dependencies]
 # local
 luars-derive.workspace = true
