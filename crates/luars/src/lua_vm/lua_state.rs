@@ -31,7 +31,7 @@ use crate::platform_time::unix_nanos;
 use crate::stdlib::debug::{objtypename, ordererror, pub_getfuncname};
 use crate::{
     AsyncReturnValue, DebugInfo, FromLua, IntoLua, LuaAnyRef, LuaFullError, LuaFunctionRef,
-    LuaProto, LuaRegistrable, LuaStringRef, LuaTableRef, UserDataRef,
+    LuaProto, LuaRegistrable, LuaStringRef, LuaTableRef, RefAliveToken, UserDataRef,
 };
 
 /// Execution state for a Lua thread/coroutine
@@ -2165,17 +2165,18 @@ impl LuaState {
     /// # Example
     /// ```ignore
     /// let mut player = Player::new("Alice", 100);
-    /// let ud = unsafe { state.create_userdata_ref(&mut player)? };
+    /// let ud = state.create_userdata_ref(&mut player)?;
     /// state.set_global("player", ud)?;
     /// state.execute_string(r#"player:take_damage(10)"#)?;
     /// assert_eq!(player.hp, 90); // Lua mutations visible in Rust
     /// ```
     #[inline]
-    pub unsafe fn create_userdata_ref<T: UserDataTrait>(
+    pub fn create_userdata_ref_value<T: UserDataTrait>(
         &mut self,
         reference: &mut T,
+        alive_token: RefAliveToken,
     ) -> CreateResult {
-        let ud = unsafe { LuaUserdata::from_ref(reference) };
+        let ud = LuaUserdata::from_ref(reference, alive_token);
         self.global_state_mut().create_userdata(ud)
     }
 

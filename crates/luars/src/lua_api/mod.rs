@@ -22,7 +22,7 @@ pub use value::Value;
 use crate::SandboxConfig;
 use crate::{
     FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaError, LuaFullError, LuaRegistrable, LuaResult,
-    LuaValue, LuaValueKind, Stdlib, UserDataRef, UserDataTrait,
+    LuaValue, LuaValueKind, RefAliveToken, Stdlib, UserDataRef, UserDataTrait,
     lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback},
 };
 
@@ -64,11 +64,11 @@ pub trait LuaApi {
     fn create_table_with_capacity(&mut self, narr: usize, nrec: usize) -> LuaResult<LuaTable>;
     fn create_userdata<T: UserDataTrait + 'static>(&mut self, data: T)
     -> LuaResult<UserDataRef<T>>;
-    /// # Safety
-    /// The caller must ensure that the provided reference is valid for the lifetime of the Lua value
-    unsafe fn create_userdata_ref<T: UserDataTrait + 'static>(
+
+    fn create_userdata_ref<T: UserDataTrait + 'static>(
         &mut self,
         reference: &mut T,
+        alive_token: RefAliveToken,
     ) -> LuaResult<UserDataRef<T>>;
     fn create_table_from<K, V, I>(&mut self, iter: I) -> LuaResult<LuaTable>
     where
@@ -191,11 +191,10 @@ pub trait LuaStackApi {
     fn lua_getupvalue(&mut self, func_idx: isize, n: usize) -> Option<String>;
     fn lua_setupvalue(&mut self, func_idx: isize, n: usize) -> LuaResult<Option<String>>;
     fn lua_pushuserdata<T: UserDataTrait + 'static>(&mut self, data: T) -> LuaResult<()>;
-    /// # Safety
-    /// The caller must ensure that the provided reference is valid for the lifetime of the Lua value
-    unsafe fn lua_pushuserdata_ref<T: UserDataTrait + 'static>(
+    fn lua_pushuserdata_ref<T: UserDataTrait + 'static>(
         &mut self,
         reference: &mut T,
+        alive_token: RefAliveToken,
     ) -> LuaResult<()>;
     fn lua_touserdata_ref<T: 'static>(&mut self, idx: isize) -> Option<UserDataRef<T>>;
     fn lua_createthread(&mut self, func_idx: isize) -> LuaResult<()>;

@@ -55,7 +55,9 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, ItemImpl, Pat, ReturnType, parse_macro_input};
 
-use crate::type_utils::normalize_type;
+use crate::type_utils::{
+    normalize_type, strip_reference, unwrap_outer_type, WrapperKind,
+};
 
 /// Kind of method discovered in the impl block.
 enum MethodKind {
@@ -65,6 +67,111 @@ enum MethodKind {
     RefMut,
     /// Associated function (no self)
     Static,
+}
+
+// ==================== Sub-reference return detection & wrapping ====================
+
+/// Result of analyzing a method return type for sub-reference wrapping.
+enum SubRefReturnKind {
+    /// Return type is `&T` or `&mut T` — needs SubRef wrapping.
+    DirectRef,
+    /// Return type is `Option<&T>` or `Option<&mut T>`.
+    OptionRef,
+    /// Return type is `Result<&T, E>` or `Result<&mut T, E>`.
+    ResultRef,
+}
+
+/// Check whether a return type (normalized) should be sub-ref-wrapped.
+fn classify_subref_return(normalized: &str) -> Option<SubRefReturnKind> {
+    // Direct reference: &T or &mut T
+    if strip_reference(normalized).is_some() {
+        return Some(SubRefReturnKind::DirectRef);
+    }
+
+    // Option<&T> or Option<&mut T>
+    if let Some((inner, WrapperKind::Option)) = unwrap_outer_type(normalized) {
+        if strip_reference(inner).is_some() {
+            return Some(SubRefReturnKind::OptionRef);
+        }
+    }
+
+    // Result<&T, E> or Result<&mut T, E>
+    if let Some((inner, WrapperKind::Result)) = unwrap_outer_type(normalized) {
+        if strip_reference(inner).is_some() {
+            return Some(SubRefReturnKind::ResultRef);
+        }
+    }
+
+    None
+}
+
+/// Generate the push code for a sub-ref wrapped value.
+///
+/// `ref_expr` — the expression evaluating to `&T`.
+/// `token_expr` — the expression evaluating to `RefAliveToken`.
+fn gen_subref_push_with_token(
+    ref_expr: proc_macro2::TokenStream,
+    token_expr: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote! {
+        {
+            let __sub = luars::SubRef::new(#ref_expr, #token_expr);
+            let __ud = luars::LuaUserdata::new(__sub);
+            let __ud_val = __l.create_userdata(__ud)
+                .map_err(|e| __l.error(format!("{:?}", e)))?;
+            __l.push_value(__ud_val)
+                .map_err(|e| __l.error(format!("{:?}", e)))?;
+            Ok(1)
+        }
+    }
+}
+
+/// Generate the return expression for a sub-ref-wrapped method result.
+///
+/// `token_expr` is evaluated once before the method call to avoid borrow conflicts
+/// with `&mut self` methods.
+fn gen_subref_return_expr(
+    result_expr: proc_macro2::TokenStream,
+    kind: &SubRefReturnKind,
+    token_expr: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    match kind {
+        SubRefReturnKind::DirectRef => {
+            gen_subref_push_with_token(result_expr, token_expr)
+        }
+        SubRefReturnKind::OptionRef => {
+            quote! {
+                match #result_expr {
+                    Some(__ref) => {
+                        let __sub = luars::SubRef::new(__ref, #token_expr);
+                        let __ud = luars::LuaUserdata::new(__sub);
+                        let __ud_val = __l.create_userdata(__ud)
+                            .map_err(|e| __l.error(format!("{:?}", e)))?;
+                        __l.push_value(__ud_val)
+                            .map_err(|e| __l.error(format!("{:?}", e)))?;
+                        Ok(1)
+                    }
+                    None => Ok(0),
+                }
+            }
+        }
+        SubRefReturnKind::ResultRef => {
+            quote! {
+                match #result_expr {
+                    Ok(__ref) => {
+                        let __sub = luars::SubRef::new(__ref, #token_expr);
+                        let __ud = luars::LuaUserdata::new(__sub);
+                        let __ud_val = __l.create_userdata(__ud)
+                            .map_err(|e| __l.error(format!("{:?}", e)))?;
+                        __l.push_value(__ud_val)
+                            .map_err(|e| __l.error(format!("{:?}", e)))?;
+                        Ok(1)
+                    }
+                    Err(__e) => Err(__l.error(__e.to_string())),
+                }
+            }
+        }
+    }
 }
 
 /// Information about a single method to be wrapped.
@@ -497,35 +604,47 @@ fn gen_ref_call(
 ) -> proc_macro2::TokenStream {
     let type_name = quote!(#self_ty).to_string();
     let method_name_str = method_name.to_string();
-    let push = gen_return_push(self_ty, return_type);
 
-    match return_type {
-        None => {
-            quote! {
-                let __self_val = __l.get_arg(1)
-                    .ok_or_else(|| __l.error(format!("{}:{} — missing self argument", #type_name, #method_name_str)))?;
-                if let Some(__ud) = __self_val.as_userdata_mut() {
-                    if let Some(__this) = __ud.downcast_ref::<#self_ty>() {
-                        __this.#method_name(#(#param_names),*);
-                        return #push;
-                    }
-                }
-                Err(__l.error(format!("{}:{} — invalid self", #type_name, #method_name_str)))
+    // Check if this is a sub-ref return type
+    let subref_kind = return_type
+        .as_ref()
+        .and_then(|ty| classify_subref_return(&normalize_type(ty)));
+
+    let call_expr = quote! { __this.#method_name(#(#param_names),*) };
+
+    let return_block = if let Some(ref kind) = subref_kind {
+        let subref_body = gen_subref_return_expr(call_expr, kind, quote! { __token });
+        subref_body
+    } else {
+        let push = gen_return_push(self_ty, return_type);
+        match return_type {
+            None => quote! { { #call_expr; #push } },
+            Some(_) => quote! { { let __result = #call_expr; #push } },
+        }
+    };
+
+    // Only extract token if sub-ref returns are used
+    let token_extract = if subref_kind.is_some() {
+        quote! {
+            let __token = __self_val
+                .as_userdata_mut()
+                .and_then(|__ud| __ud.sub_guard_token())
+                .unwrap_or_else(|| luars::RefAliveToken::dead());
+        }
+    } else {
+        quote! {}
+    };
+
+    quote! {
+        let __self_val = __l.get_arg(1)
+            .ok_or_else(|| __l.error(format!("{}:{} — missing self argument", #type_name, #method_name_str)))?;
+        #token_extract
+        if let Some(__ud) = __self_val.as_userdata_mut() {
+            if let Some(__this) = __ud.downcast_ref::<#self_ty>() {
+                return #return_block;
             }
         }
-        Some(_) => {
-            quote! {
-                let __self_val = __l.get_arg(1)
-                    .ok_or_else(|| __l.error(format!("{}:{} — missing self argument", #type_name, #method_name_str)))?;
-                if let Some(__ud) = __self_val.as_userdata_mut() {
-                    if let Some(__this) = __ud.downcast_ref::<#self_ty>() {
-                        let __result = __this.#method_name(#(#param_names),*);
-                        return { #push };
-                    }
-                }
-                Err(__l.error(format!("{}:{} — invalid self", #type_name, #method_name_str)))
-            }
-        }
+        Err(__l.error(format!("{}:{} — invalid self", #type_name, #method_name_str)))
     }
 }
 
@@ -538,34 +657,49 @@ fn gen_mut_call(
 ) -> proc_macro2::TokenStream {
     let type_name = quote!(#self_ty).to_string();
     let method_name_str = method_name.to_string();
-    let push = gen_return_push(self_ty, return_type);
 
-    match return_type {
-        None => {
-            quote! {
-                let __self_val = __l.get_arg(1)
-                    .ok_or_else(|| __l.error(format!("{}:{} — missing self argument", #type_name, #method_name_str)))?;
-                if let Some(__ud) = __self_val.as_userdata_mut() {
-                    if let Some(__this) = __ud.downcast_mut::<#self_ty>() {
-                        __this.#method_name(#(#param_names),*);
-                        return #push;
-                    }
-                }
-                Err(__l.error(format!("{}:{} — invalid self", #type_name, #method_name_str)))
+    // Check if this is a sub-ref return type
+    let subref_kind = return_type
+        .as_ref()
+        .and_then(|ty| classify_subref_return(&normalize_type(ty)));
+
+    let call_expr = quote! { __this.#method_name(#(#param_names),*) };
+
+    let return_block = if let Some(ref kind) = subref_kind {
+        let subref_body = gen_subref_return_expr(call_expr, kind, quote! { __token });
+        subref_body
+    } else {
+        let push = gen_return_push(self_ty, return_type);
+        match return_type {
+            None => quote! { { #call_expr; #push } },
+            Some(_) => quote! { { let __result = #call_expr; #push } },
+        }
+    };
+
+    // For &mut self, extract token in its own scope to avoid overlapping &mut
+    let token_extract = if subref_kind.is_some() {
+        quote! {
+            let __token = {
+                let __ud = __self_val
+                    .as_userdata_mut()
+                    .ok_or_else(|| __l.error(format!("{}:{} — userdata expected", #type_name, #method_name_str)))?;
+                __ud.sub_guard_token()
+                    .unwrap_or_else(|| luars::RefAliveToken::dead())
+            };
+        }
+    } else {
+        quote! {}
+    };
+
+    quote! {
+        let __self_val = __l.get_arg(1)
+            .ok_or_else(|| __l.error(format!("{}:{} — missing self argument", #type_name, #method_name_str)))?;
+        #token_extract
+        if let Some(__ud) = __self_val.as_userdata_mut() {
+            if let Some(__this) = __ud.downcast_mut::<#self_ty>() {
+                return #return_block;
             }
         }
-        Some(_) => {
-            quote! {
-                let __self_val = __l.get_arg(1)
-                    .ok_or_else(|| __l.error(format!("{}:{} — missing self argument", #type_name, #method_name_str)))?;
-                if let Some(__ud) = __self_val.as_userdata_mut() {
-                    if let Some(__this) = __ud.downcast_mut::<#self_ty>() {
-                        let __result = __this.#method_name(#(#param_names),*);
-                        return { #push };
-                    }
-                }
-                Err(__l.error(format!("{}:{} — invalid self", #type_name, #method_name_str)))
-            }
-        }
+        Err(__l.error(format!("{}:{} — invalid self", #type_name, #method_name_str)))
     }
 }

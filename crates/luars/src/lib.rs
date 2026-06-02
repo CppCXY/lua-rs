@@ -35,9 +35,10 @@ pub use luars_derive::lua_methods;
 // Re-export userdata trait types at crate root for convenience
 pub use lua_value::LuaUserdata;
 pub use lua_value::UserDataBuilder;
+pub use lua_value::alive_ref::RefAliveToken;
 pub use lua_value::userdata_trait::{
     LuaEnum, LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, OpaqueUserData,
-    RefUserData, UdValue, UserDataTrait,
+    UdValue, UserDataTrait,
 };
 
 pub use lib_registry::{LibraryModule, LibraryRegistry, LuaLibrary, PreloadModule};
@@ -54,7 +55,6 @@ pub use lua_vm::async_thread::{
     AsyncCallHandle, AsyncFuture, AsyncReturnValue, AsyncThread, IntoAsyncLua,
 };
 pub use lua_vm::lua_error::{LuaError, LuaFullError};
-pub use lua_vm::table_builder::TableBuilder;
 pub use lua_vm::{
     CFunction, CallInfo, DebugInfo, GlobalState, Instruction, LuaAnyRef, LuaFunctionRef, LuaResult,
     LuaState, LuaStringRef, LuaTableRef, OpCode, UserDataRef,

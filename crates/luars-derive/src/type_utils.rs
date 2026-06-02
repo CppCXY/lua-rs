@@ -13,6 +13,102 @@ pub fn normalize_type(ty: &syn::Type) -> String {
     quote!(#ty).to_string().replace(" ", "")
 }
 
+/// Check whether a normalized type string is a "primitive" that should
+/// use value semantics (copy/clone) rather than sub-reference.
+///
+/// Non-primitive types (userdata types like `Vec3`, `Player`, etc.)
+/// should return sub-references when the struct has a `SubRefGuard`.
+pub fn is_primitive_type(normalized: &str) -> bool {
+    matches!(
+        normalized,
+        "i8" | "i16" | "i32" | "i64" | "isize"
+            | "u8" | "u16" | "u32" | "u64" | "usize"
+            | "f32" | "f64"
+            | "bool"
+            | "String"
+    )
+}
+
+/// Strip leading `&` or `&mut` and any lifetime from a reference type string.
+///
+/// `"&'aCounter"` → `("Counter", "&")`, `"&mutCounter"` → `("Counter", "&mut")`.
+/// Returns `None` if the type is not a reference.
+pub fn strip_reference(normalized: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = normalized.strip_prefix("&mut") {
+        let inner = strip_lifetime(rest);
+        Some((inner, "&mut"))
+    } else if let Some(rest) = normalized.strip_prefix('&') {
+        let inner = strip_lifetime(rest);
+        Some((inner, "&"))
+    } else {
+        None
+    }
+}
+
+/// Strip lifetime prefix like `'a` from a string.
+fn strip_lifetime(s: &str) -> &str {
+    if s.starts_with('\'') {
+        s.trim_start_matches(|c: char| c == '\'' || c.is_alphanumeric())
+    } else {
+        s
+    }
+}
+
+/// Unwrap a single layer of `Option<...>` or `Result<..., E>` and return
+/// the inner type + the wrapper kind.
+#[derive(Debug, PartialEq)]
+pub enum WrapperKind {
+    /// `Option<T>`
+    Option,
+    /// `Result<T, E>`
+    Result,
+}
+
+/// If `normalized` is `Option<Inner>` or `Result<Inner, Error>`,
+/// return `(Inner, WrapperKind)`. Otherwise `None`.
+pub fn unwrap_outer_type(normalized: &str) -> Option<(&str, WrapperKind)> {
+    if let Some(inner) = normalized
+        .strip_prefix("Option<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        return Some((inner, WrapperKind::Option));
+    }
+    if let Some(rest) = normalized.strip_prefix("Result<") {
+        // Result<Inner, Error> — split on first comma at depth 0
+        if let Some(inner) = split_at_top_level_comma(rest) {
+            return Some((inner, WrapperKind::Result));
+        }
+    }
+    None
+}
+
+/// Split `T,E` at the top-level comma (respects nested `<>`).
+/// Returns the part before the comma.
+fn split_at_top_level_comma(s: &str) -> Option<&str> {
+    let mut depth = 0u32;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                if depth == 0 {
+                    return None; // closing > without opening < — not ours
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => {
+                let inner = &s[..i];
+                // Ensure there's something after the comma (the error type)
+                if i + 1 < s.len() {
+                    return Some(inner);
+                }
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Generate code to convert a Rust field value → `UdValue`.
 ///
 /// Used by the derive macro's `get_field` implementation.

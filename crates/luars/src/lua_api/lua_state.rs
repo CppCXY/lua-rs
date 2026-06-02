@@ -7,9 +7,7 @@ use crate::lua_api::{
 use crate::lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback};
 use crate::stdlib::basic::parse_number::parse_lua_number;
 use crate::{
-    FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaError, LuaFullError, LuaRegistrable, LuaResult,
-    LuaStackApi, LuaState, LuaUserdata, LuaValue, LuaValueKind, StackValueApi, Stdlib, UserDataRef,
-    UserDataTrait,
+    FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaError, LuaFullError, LuaRegistrable, LuaResult, LuaStackApi, LuaState, LuaUserdata, LuaValue, LuaValueKind, RefAliveToken, StackValueApi, Stdlib, UserDataRef, UserDataTrait
 };
 
 fn stack_api_base(state: &LuaState) -> usize {
@@ -519,11 +517,12 @@ impl LuaApi for LuaState {
             .ok_or_else(|| self.error("value is not the expected userdata type".to_string()))
     }
 
-    unsafe fn create_userdata_ref<T: UserDataTrait + 'static>(
+    fn create_userdata_ref<T: UserDataTrait + 'static>(
         &mut self,
         reference: &mut T,
+        alive_token: RefAliveToken,
     ) -> LuaResult<UserDataRef<T>> {
-        let value = unsafe { LuaState::create_userdata_ref(self, reference)? };
+        let value = LuaState::create_userdata_ref_value(self, reference, alive_token)?;
         self.to_userdata_ref(value)
             .ok_or_else(|| self.error("value is not the expected userdata type".to_string()))
     }
@@ -1110,11 +1109,12 @@ impl LuaStackApi for LuaState {
         self.push_value(value)
     }
 
-    unsafe fn lua_pushuserdata_ref<T: UserDataTrait + 'static>(
+    fn lua_pushuserdata_ref<T: UserDataTrait + 'static>(
         &mut self,
         reference: &mut T,
+        alive_token: RefAliveToken,
     ) -> LuaResult<()> {
-        let value = unsafe { LuaState::create_userdata_ref(self, reference)? };
+        let value = LuaState::create_userdata_ref_value(self, reference, alive_token)?;
         self.push_value(value)
     }
 

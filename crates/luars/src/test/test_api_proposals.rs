@@ -383,84 +383,6 @@ fn test_load_reuses_source_name_across_child_protos() {
 }
 
 // ============================
-// P4: register_type_of on LuaVM (tested implicitly via existing userdata tests)
-// ============================
-
-// ============================
-// P5: TableBuilder
-// ============================
-
-#[test]
-fn test_table_builder_named_keys() {
-    let mut vm = GlobalState::new(SafeOption::default());
-    vm.open_stdlib(Stdlib::All).unwrap();
-
-    let host = vm.create_string("localhost").unwrap();
-    let table = TableBuilder::new()
-        .set("host", host)
-        .set("port", LuaValue::integer(8080))
-        .build(&mut vm)
-        .unwrap();
-
-    let host_key = vm.create_string("host").unwrap();
-    let port_key = vm.create_string("port").unwrap();
-    assert_eq!(
-        vm.raw_get(&table, &host_key).unwrap().as_str(),
-        Some("localhost")
-    );
-    assert_eq!(
-        vm.raw_get(&table, &port_key).unwrap().as_integer(),
-        Some(8080)
-    );
-}
-
-#[test]
-fn test_table_builder_array() {
-    let mut vm = GlobalState::new(SafeOption::default());
-    vm.open_stdlib(Stdlib::All).unwrap();
-
-    let table = TableBuilder::new()
-        .push(LuaValue::integer(10))
-        .push(LuaValue::integer(20))
-        .push(LuaValue::integer(30))
-        .build(&mut vm)
-        .unwrap();
-
-    vm.set_global("arr", table).unwrap();
-    let results = vm
-        .main_state()
-        .execute("return #arr, arr[1], arr[2], arr[3]")
-        .unwrap();
-    assert_eq!(results[0].as_integer(), Some(3));
-    assert_eq!(results[1].as_integer(), Some(10));
-    assert_eq!(results[2].as_integer(), Some(20));
-    assert_eq!(results[3].as_integer(), Some(30));
-}
-
-#[test]
-fn test_table_builder_mixed() {
-    let mut vm = GlobalState::new(SafeOption::default());
-    vm.open_stdlib(Stdlib::All).unwrap();
-
-    let name = vm.create_string("test").unwrap();
-    let table = TableBuilder::new()
-        .push(LuaValue::integer(1))
-        .push(LuaValue::integer(2))
-        .set("name", name)
-        .build(&mut vm)
-        .unwrap();
-
-    vm.set_global("t", table).unwrap();
-    let results = vm
-        .main_state()
-        .execute("return t[1], t[2], t.name")
-        .unwrap();
-    assert_eq!(results[0].as_integer(), Some(1));
-    assert_eq!(results[1].as_integer(), Some(2));
-    assert_eq!(results[2].as_str(), Some("test"));
-}
-
-// ============================
 // P6: LuaError Display / std::error::Error
 // ============================
 
@@ -573,46 +495,6 @@ fn test_open_stdlibs() {
         .execute("return string.upper('hello')")
         .unwrap();
     assert_eq!(results[0].as_str(), Some("HELLO"));
-}
-
-// ============================
-// P10: table_pairs / table_length
-// ============================
-
-#[test]
-fn test_table_pairs() {
-    let mut vm = GlobalState::new(SafeOption::default());
-    vm.open_stdlib(Stdlib::All).unwrap();
-
-    let table = TableBuilder::new()
-        .set("a", LuaValue::integer(1))
-        .set("b", LuaValue::integer(2))
-        .build(&mut vm)
-        .unwrap();
-
-    let pairs = vm.table_pairs(&table).unwrap();
-    assert_eq!(pairs.len(), 2);
-
-    // Check that both entries exist (order is not guaranteed)
-    let keys: Vec<_> = pairs.iter().map(|(k, _)| k.as_str().unwrap()).collect();
-    assert!(keys.contains(&"a"));
-    assert!(keys.contains(&"b"));
-}
-
-#[test]
-fn test_table_length() {
-    let mut vm = GlobalState::new(SafeOption::default());
-    vm.open_stdlib(Stdlib::All).unwrap();
-
-    let table = TableBuilder::new()
-        .push(LuaValue::integer(10))
-        .push(LuaValue::integer(20))
-        .push(LuaValue::integer(30))
-        .build(&mut vm)
-        .unwrap();
-
-    let len = vm.table_length(&table).unwrap();
-    assert_eq!(len, 3);
 }
 
 // ============================

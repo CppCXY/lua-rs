@@ -24,7 +24,9 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, Ident, Meta};
 
-use crate::type_utils::{field_to_udvalue, ref_to_udvalue, udvalue_to_field};
+use crate::type_utils::{
+    field_to_udvalue, is_primitive_type, normalize_type, ref_to_udvalue, udvalue_to_field,
+};
 
 fn gen_lua_convert_impls(name: &Ident) -> proc_macro2::TokenStream {
     quote! {
@@ -178,16 +180,59 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
     let get_field_arms = field_infos.iter().map(|f| {
         let ident = &f.ident;
         let lua_name = &f.lua_name;
-        let conversion = field_to_udvalue(&f.ty, quote!(self.#ident));
-        quote! { #lua_name => Some(#conversion), }
+        let type_str = normalize_type(&f.ty);
+
+        if is_primitive_type(&type_str) {
+            // Primitive: use value conversion (copy/clone)
+            let conversion = field_to_udvalue(&f.ty, quote!(self.#ident));
+            quote! { #lua_name => Some(#conversion), }
+        } else {
+            // Non-primitive: return sub-ref marker — the VM will wrap with
+            // the parent userdata's sub_guard token.
+            quote! {
+                #lua_name => Some(
+                    luars::UdValue::SubRef(
+                        &self.#ident as &dyn luars::UserDataTrait as *const (dyn luars::UserDataTrait + 'static)
+                    )
+                ),
+            }
+        }
     });
 
     // Generate set_field match arms (writable fields)
     let set_field_arms = field_infos.iter().filter(|f| !f.readonly).map(|f| {
         let ident = &f.ident;
         let lua_name = &f.lua_name;
-        let assign = udvalue_to_field(&f.ty, quote!(self.#ident), lua_name);
-        quote! { #lua_name => { #assign } }
+        let type_str = normalize_type(&f.ty);
+
+        if is_primitive_type(&type_str) {
+            let assign = udvalue_to_field(&f.ty, quote!(self.#ident), lua_name);
+            quote! { #lua_name => { #assign } }
+        } else {
+            // Non-primitive: support setting via downcast + clone
+            let ty = &f.ty;
+            quote! {
+                #lua_name => {
+                    match &value {
+                        luars::UdValue::UserdataRef(__ptr) => {
+                            let __any_ref = unsafe { &**__ptr };
+                            if let Some(__v) = __any_ref.downcast_ref::<#ty>() {
+                                self.#ident = __v.clone();
+                                Some(Ok(()))
+                            } else {
+                                Some(Err(format!(
+                                    "type mismatch for field '{}': expected {}",
+                                    #lua_name, std::any::type_name::<#ty>()
+                                )))
+                            }
+                        }
+                        _ => Some(Err(format!(
+                            "expected userdata for field '{}'", #lua_name
+                        )))
+                    }
+                }
+            }
+        }
     });
 
     // Generate set_field match arms (readonly fields → error)

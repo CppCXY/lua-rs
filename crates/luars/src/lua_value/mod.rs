@@ -6,17 +6,20 @@ mod lua_string;
 mod lua_table;
 #[allow(clippy::module_inception)]
 mod lua_value;
+pub mod alive_ref;
+mod userdata;
 pub mod userdata_builder;
 pub mod userdata_trait;
 
 use self::lua_value::Value;
-use std::any::Any;
-use std::fmt;
 use std::sync::Arc;
 
 pub use lua_string::*;
+pub use userdata::LuaUserdata;
 pub use userdata_builder::UserDataBuilder;
-pub use userdata_trait::{UserDataTrait, lua_value_to_udvalue, udvalue_to_lua_value};
+pub use userdata_trait::{
+    lua_value_to_udvalue, udvalue_to_lua_value, udvalue_to_lua_value_with_token,
+};
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaRawTable;
@@ -25,9 +28,9 @@ pub use lua_value::{LuaValue, LuaValueKind};
 
 pub(crate) type LuaInnerValue = Value; // For internal use within LuaValue implementation
 
-use crate::gc::{ProtoPtr, TablePtr, UpvaluePtr};
+use crate::Instruction;
+use crate::gc::{ProtoPtr, UpvaluePtr};
 use crate::lua_vm::CFunction;
-use crate::{Instruction, RefUserData};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct LuaValuePtr {
@@ -207,151 +210,6 @@ impl LuaUpvalue {
         } else {
             None
         }
-    }
-}
-
-/// Userdata - arbitrary Rust data with optional metatable.
-///
-/// Uses `Box<dyn UserDataTrait>` for trait-based dispatch of field access,
-/// method calls, and metamethods. Falls back to metatable for Lua-level customization.
-pub struct LuaUserdata {
-    data: Box<dyn UserDataTrait>,
-    metatable: TablePtr,
-}
-
-impl LuaUserdata {
-    /// Create a new userdata wrapping a value that implements `UserDataTrait`.
-    pub fn new<T: UserDataTrait>(data: T) -> Self {
-        LuaUserdata {
-            data: Box::new(data),
-            metatable: TablePtr::null(),
-        }
-    }
-
-    /// Create a userdata from an already-boxed trait object.
-    ///
-    /// Used by the VM to convert `UdValue::UserdataOwned` results from
-    /// arithmetic trait methods into GC-managed userdata.
-    pub fn from_boxed(data: Box<dyn UserDataTrait>) -> Self {
-        LuaUserdata {
-            data,
-            metatable: TablePtr::null(),
-        }
-    }
-
-    /// Create a borrowed userdata from a mutable reference.
-    ///
-    /// The resulting userdata forwards all field/method/metamethod access through
-    /// a raw pointer — zero overhead, no ownership transfer.
-    ///
-    /// # Safety
-    /// The referenced object **must** outlive all Lua accesses to this userdata.
-    /// Accessing the userdata after the Rust object is dropped is **undefined behavior**.
-    #[inline]
-    pub unsafe fn from_ref<T: UserDataTrait>(reference: &mut T) -> Self {
-        LuaUserdata {
-            data: Box::new(unsafe { RefUserData::new(reference) }),
-            metatable: TablePtr::null(),
-        }
-    }
-
-    /// Create a borrowed userdata from a raw pointer.
-    ///
-    /// # Safety
-    /// The pointer must be valid and properly aligned for the entire duration
-    /// that Lua can access this userdata.
-    #[inline]
-    pub unsafe fn from_raw_ptr<T: UserDataTrait>(ptr: *mut T) -> Self {
-        LuaUserdata {
-            data: Box::new(unsafe { RefUserData::from_raw(ptr) }),
-            metatable: TablePtr::null(),
-        }
-    }
-
-    /// Create a new userdata with an initial metatable.
-    pub fn with_metatable<T: UserDataTrait>(data: T, metatable: TablePtr) -> Self {
-        LuaUserdata {
-            data: Box::new(data),
-            metatable,
-        }
-    }
-
-    // ==================== Trait-based access ====================
-
-    /// Get the trait object for direct field/method/metamethod dispatch.
-    #[inline]
-    pub fn get_trait(&self) -> &dyn UserDataTrait {
-        self.data.as_ref()
-    }
-
-    /// Get the mutable trait object.
-    #[inline]
-    pub fn get_trait_mut(&mut self) -> &mut dyn UserDataTrait {
-        self.data.as_mut()
-    }
-
-    /// Get the type name from the trait.
-    #[inline]
-    pub fn type_name(&self) -> &'static str {
-        self.data.type_name()
-    }
-
-    // ==================== Backward-compatible downcast access ====================
-
-    /// Downcast to a concrete type (immutable). Equivalent to old `get_data().downcast_ref::<T>()`.
-    #[inline]
-    pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
-        self.data.as_any().downcast_ref::<T>()
-    }
-
-    /// Downcast to a concrete type (mutable). Equivalent to old `get_data_mut().downcast_mut::<T>()`.
-    #[inline]
-    pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
-        self.data.as_any_mut().downcast_mut::<T>()
-    }
-
-    /// Get raw `&dyn Any` reference (backward compatibility).
-    pub fn get_data(&self) -> &dyn Any {
-        self.data.as_any()
-    }
-
-    /// Get raw `&mut dyn Any` reference (backward compatibility).
-    pub fn get_data_mut(&mut self) -> &mut dyn Any {
-        self.data.as_any_mut()
-    }
-
-    // ==================== Metatable ====================
-
-    pub fn get_metatable(&self) -> Option<LuaValue> {
-        if self.metatable.is_null() {
-            None
-        } else {
-            Some(LuaValue::table(self.metatable))
-        }
-    }
-
-    pub(crate) fn set_metatable(&mut self, metatable: LuaValue) {
-        if let Some(table_ptr) = metatable.as_table_ptr() {
-            self.metatable = table_ptr;
-        } else if metatable.is_nil() {
-            self.metatable = TablePtr::null();
-        } else {
-            debug_assert!(
-                false,
-                "Attempted to set userdata metatable to non-table, non-nil value"
-            );
-        }
-    }
-}
-
-impl fmt::Debug for LuaUserdata {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Userdata({}@{:p})",
-            self.data.type_name(),
-            self.data.as_any() as *const dyn Any
-        )
     }
 }
 

@@ -4,7 +4,7 @@ use crate::stdlib::debug::{objtypename, ordererror, typeerror};
 use crate::{
     Instruction, LuaProto, LuaResult, LuaValue, OpCode,
     gc::TablePtr,
-    lua_value::{lua_value_to_udvalue, udvalue_to_lua_value},
+    lua_value::{lua_value_to_udvalue, udvalue_to_lua_value, udvalue_to_lua_value_with_token},
     lua_vm::{
         LuaError, LuaState, TmKind,
         call_info::call_status::{
@@ -481,7 +481,8 @@ fn finishget_inner(
                 if let Some(key_str) = key.as_str()
                     && let Some(udv) = ud.get_trait().get_field(key_str)
                 {
-                    let result = udvalue_to_lua_value(lua_state, udv)?;
+                    let token = ud.sub_guard_token();
+                    let result = udvalue_to_lua_value_with_token(lua_state, udv, token)?;
                     return Ok(Some(result));
                 }
             }
@@ -1602,7 +1603,8 @@ fn finishget_to_reg_inner(
                 && let Some(key_str) = key.as_str()
                 && let Some(udv) = ud.get_trait().get_field(key_str)
             {
-                let result = udvalue_to_lua_value(lua_state, udv)?;
+                let token = ud.sub_guard_token();
+                let result = udvalue_to_lua_value_with_token(lua_state, udv, token)?;
                 setobj2s(lua_state, dest_reg, &result);
                 return Ok(());
             }

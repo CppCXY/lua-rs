@@ -22,7 +22,6 @@ mod sandbox;
 #[cfg(feature = "shared-proto")]
 mod shared_proto;
 mod string_arth;
-pub mod table_builder;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
 use crate::gc::{
@@ -53,7 +52,7 @@ pub use crate::lua_vm::safe_option::SafeOption;
 pub use crate::lua_vm::sandbox::SandboxConfig;
 use crate::platform_time::{PlatformInstant, unix_nanos};
 use crate::stdlib::Stdlib;
-use crate::{LuaEnum, LuaRegistrable, OpaqueUserData, RustCallback, TableBuilder, lib_registry};
+use crate::{LuaEnum, LuaRegistrable, OpaqueUserData, RustCallback, lib_registry};
 pub use execute::TmKind;
 pub(crate) use execute::helper::{lua_shiftl, luai_numpow};
 pub use execute::{get_metamethod_event, get_metatable};
@@ -624,12 +623,6 @@ impl GlobalState {
         hash_size: usize,
     ) -> LuaResult<LuaTableRef> {
         let table = self.create_table(array_size, hash_size)?;
-        Ok(self.to_table_ref(table).unwrap())
-    }
-
-    /// Build a table from a `TableBuilder` and return a `LuaTableRef`.
-    pub fn build_table_ref(&mut self, builder: TableBuilder) -> LuaResult<LuaTableRef> {
-        let table = builder.build(self)?;
         Ok(self.to_table_ref(table).unwrap())
     }
 

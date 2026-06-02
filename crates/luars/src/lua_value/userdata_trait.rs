@@ -15,7 +15,7 @@ use std::any::Any;
 use std::fmt;
 
 use crate::lua_vm::CFunction;
-use crate::{LuaResult, LuaState, LuaUserdata, LuaValue};
+use crate::{LuaResult, LuaState, LuaUserdata, LuaValue, RefAliveToken};
 
 /// Intermediate value type for userdata field/method returns.
 ///
@@ -37,6 +37,10 @@ pub enum UdValue {
     /// Owned userdata value (as return from arithmetic trait methods).
     /// The VM allocates this as a new GC-managed userdata.
     UserdataOwned(Box<dyn UserDataTrait>),
+    /// Marker for a sub-reference candidate. Contains a raw pointer to data
+    /// inside the parent userdata. The VM layer converts this to a
+    /// [`SubRef`](crate::SubRef) by combining it with the parent's sub_guard token.
+    SubRef(*const (dyn UserDataTrait + 'static)),
 }
 
 impl Clone for UdValue {
@@ -49,12 +53,8 @@ impl Clone for UdValue {
             UdValue::Str(s) => UdValue::Str(s.clone()),
             UdValue::Function(f) => UdValue::Function(*f),
             UdValue::UserdataRef(p) => UdValue::UserdataRef(*p),
-            UdValue::UserdataOwned(_) => {
-                // Cannot clone owned userdata — return Nil as fallback.
-                // This should not happen in practice; the VM consumes owned
-                // userdata immediately.
-                UdValue::Nil
-            }
+            UdValue::UserdataOwned(_) => UdValue::Nil,
+            UdValue::SubRef(p) => UdValue::SubRef(*p),
         }
     }
 }
@@ -473,6 +473,7 @@ impl fmt::Debug for UdValue {
             UdValue::Function(_) => write!(f, "Function(<cfunction>)"),
             UdValue::UserdataRef(_) => write!(f, "UserdataRef(<ptr>)"),
             UdValue::UserdataOwned(ud) => write!(f, "UserdataOwned({})", ud.type_name()),
+            UdValue::SubRef(_) => write!(f, "SubRef(<ptr>)"),
         }
     }
 }
@@ -488,6 +489,7 @@ impl fmt::Display for UdValue {
             UdValue::Function(_) => write!(f, "function"),
             UdValue::UserdataRef(_) => write!(f, "userdata"),
             UdValue::UserdataOwned(ud) => write!(f, "{}", ud.type_name()),
+            UdValue::SubRef(_) => write!(f, "userdata"),
         }
     }
 }
@@ -507,12 +509,34 @@ pub fn udvalue_to_lua_value(lua_state: &mut LuaState, udv: UdValue) -> LuaResult
         UdValue::Number(n) => Ok(LuaValue::float(n)),
         UdValue::Str(s) => lua_state.create_string(&s),
         UdValue::Function(f) => Ok(LuaValue::cfunction(f)),
-        UdValue::UserdataRef(_) => Ok(LuaValue::nil()), // should not be returned
+        UdValue::UserdataRef(_) => Ok(LuaValue::nil()),
         UdValue::UserdataOwned(ud) => {
             let userdata = LuaUserdata::from_boxed(ud);
             lua_state.create_userdata(userdata)
         }
+        UdValue::SubRef(_) => {
+            // SubRef without a parent token is an error — the caller must use
+            // udvalue_to_lua_value_with_token
+            panic!("UdValue::SubRef requires parent token; use udvalue_to_lua_value_with_token")
+        }
     }
+}
+
+/// Convert a `UdValue` to a `LuaValue`, with an optional parent sub-ref token.
+///
+/// If `udv` is `UdValue::SubRef(ptr)` and `parent_token` is `Some`, creates a
+/// [`SubRefRaw`](crate::lua_value::sub_ref::SubRefRaw) wrapper linked to the parent.
+/// Otherwise delegates to [`udvalue_to_lua_value`].
+pub fn udvalue_to_lua_value_with_token(
+    lua_state: &mut LuaState,
+    udv: UdValue,
+    parent_token: RefAliveToken,
+) -> LuaResult<LuaValue> {
+    if let UdValue::SubRef(ptr) = udv {
+        let userdata = LuaUserdata::from_ptr(ptr, parent_token);
+        return lua_state.create_userdata(userdata);
+    }
+    udvalue_to_lua_value(lua_state, udv)
 }
 
 /// Convert a `LuaValue` to a `UdValue`.
@@ -702,197 +726,5 @@ impl<T: 'static> UserDataTrait for OpaqueUserData<T> {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         &mut self.value
-    }
-}
-
-// ==================== RefUserData — zero-cost borrowed reference ====================
-
-/// A userdata wrapper that holds a raw pointer to an external `T: UserDataTrait`.
-///
-/// This enables passing Rust objects to Lua **by reference** without transferring
-/// ownership. The object lives on the Rust side; Lua sees a full userdata with
-/// field access, method calls, and metamethods — all forwarded through the pointer.
-///
-/// # Performance
-/// Zero overhead compared to owned userdata — no `Rc`, no `RefCell`, no
-/// atomic operations. The pointer is dereferenced directly on every access.
-///
-/// # Safety
-/// The caller **must** guarantee that the pointee outlives every Lua access.
-/// Accessing the userdata after the Rust object is dropped is undefined behavior.
-/// This is deliberately an `unsafe` API — the same contract as C Lua's light
-/// userdata, but with full trait-based dispatch.
-///
-/// # Example
-/// ```ignore
-/// let mut player = Player::new("Alice", 100);
-///
-/// // Lend to Lua (no ownership transfer)
-/// let ud_val = state.create_userdata_ref(&mut player)?;
-/// state.set_global("player", ud_val)?;
-///
-/// // Lua can read/write fields, call methods — all forwarded to `player`
-/// state.execute_string(r#"
-///     print(player.name)      -- "Alice"
-///     player:take_damage(10)
-///     print(player.hp)        -- 90
-/// "#)?;
-///
-/// // Back in Rust, `player` reflects the mutations
-/// assert_eq!(player.hp, 90);
-/// ```
-pub struct RefUserData<T: UserDataTrait> {
-    ptr: *mut T,
-}
-
-impl<T: UserDataTrait> RefUserData<T> {
-    /// Create a `RefUserData` from a mutable reference.
-    ///
-    /// # Safety
-    /// The referenced object must outlive all Lua accesses to this userdata.
-    #[inline]
-    pub unsafe fn new(reference: &mut T) -> Self {
-        RefUserData {
-            ptr: reference as *mut T,
-        }
-    }
-
-    /// Create from a raw pointer.
-    ///
-    /// # Safety
-    /// The pointer must be valid and properly aligned for the entire duration
-    /// that Lua can access this userdata.
-    #[inline]
-    pub unsafe fn from_raw(ptr: *mut T) -> Self {
-        RefUserData { ptr }
-    }
-
-    #[inline]
-    fn inner(&self) -> &T {
-        unsafe { &*self.ptr }
-    }
-
-    #[inline]
-    fn inner_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.ptr }
-    }
-}
-
-/// Forward every `UserDataTrait` method to the pointee.
-///
-/// This is intentionally not `'static` on `T` alone — the `'static` bound
-/// comes from `UserDataTrait: 'static`. The raw pointer erases the lifetime;
-/// correctness relies on the caller's safety guarantee.
-impl<T: UserDataTrait> UserDataTrait for RefUserData<T> {
-    #[inline]
-    fn type_name(&self) -> &'static str {
-        self.inner().type_name()
-    }
-
-    #[inline]
-    fn get_field(&self, key: &str) -> Option<UdValue> {
-        self.inner().get_field(key)
-    }
-
-    #[inline]
-    fn set_field(&mut self, key: &str, value: UdValue) -> Option<Result<(), String>> {
-        self.inner_mut().set_field(key, value)
-    }
-
-    fn lua_tostring(&self) -> Option<String> {
-        self.inner().lua_tostring()
-    }
-
-    fn lua_eq(&self, other: &dyn UserDataTrait) -> Option<bool> {
-        self.inner().lua_eq(other)
-    }
-
-    fn lua_lt(&self, other: &dyn UserDataTrait) -> Option<bool> {
-        self.inner().lua_lt(other)
-    }
-
-    fn lua_le(&self, other: &dyn UserDataTrait) -> Option<bool> {
-        self.inner().lua_le(other)
-    }
-
-    fn lua_len(&self) -> Option<UdValue> {
-        self.inner().lua_len()
-    }
-
-    fn lua_unm(&self) -> Option<UdValue> {
-        self.inner().lua_unm()
-    }
-
-    fn lua_bnot(&self) -> Option<UdValue> {
-        self.inner().lua_bnot()
-    }
-
-    fn lua_add(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_add(other)
-    }
-
-    fn lua_sub(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_sub(other)
-    }
-
-    fn lua_mul(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_mul(other)
-    }
-
-    fn lua_div(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_div(other)
-    }
-
-    fn lua_mod(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_mod(other)
-    }
-
-    fn lua_pow(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_pow(other)
-    }
-
-    fn lua_idiv(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_idiv(other)
-    }
-
-    fn lua_band(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_band(other)
-    }
-
-    fn lua_bor(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_bor(other)
-    }
-
-    fn lua_bxor(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_bxor(other)
-    }
-
-    fn lua_shl(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_shl(other)
-    }
-
-    fn lua_shr(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_shr(other)
-    }
-
-    fn lua_concat(&self, other: &UdValue) -> Option<UdValue> {
-        self.inner().lua_concat(other)
-    }
-
-    fn lua_close(&mut self) {
-        // Forward to pointee — the caller owns the data, close it if needed.
-        self.inner_mut().lua_close();
-    }
-
-    fn field_names(&self) -> &'static [&'static str] {
-        self.inner().field_names()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self.inner().as_any()
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self.inner_mut().as_any_mut()
     }
 }

@@ -9,7 +9,7 @@ mod tests {
     use crate::lua_api::Value;
     use crate::{
         GlobalState, LuaApi, LuaAsyncApi, LuaStackApi, LuaUserData, LuaValue, LuaValueKind,
-        SafeOption, Stdlib,
+        RefAliveToken, SafeOption, Stdlib,
         lua_api::{
             LUA_GLOBALSINDEX, LUA_MULTRET, LUA_REGISTRYINDEX, Lua, LuaFunction, LuaTable,
             lua_upvalueindex,
@@ -422,7 +422,8 @@ mod tests {
         lua.open_stdlib(Stdlib::All).unwrap();
 
         let mut counter = ApiCounter { count: 2 };
-        let borrowed = unsafe { lua.create_userdata_ref(&mut counter).unwrap() };
+        let alive = RefAliveToken::default();
+        let borrowed = lua.create_userdata_ref(&mut counter, alive).unwrap();
         lua.globals().set("borrowed", borrowed.clone()).unwrap();
         lua.load("borrowed:inc(40)").exec().unwrap();
 

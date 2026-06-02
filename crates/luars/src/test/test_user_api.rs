@@ -577,31 +577,6 @@ fn test_userdata_builder_setter() {
 }
 
 // ============================================================================
-// build_table_ref / TableBuilder integration
-// ============================================================================
-
-#[test]
-fn test_build_table_ref() {
-    use crate::TableBuilder;
-
-    let mut vm = GlobalState::new(SafeOption::default());
-
-    let name_str = vm.create_string("Alice").unwrap();
-    let tbl = vm
-        .build_table_ref(
-            TableBuilder::new()
-                .set("name", name_str)
-                .set("age", LuaValue::integer(30)),
-        )
-        .unwrap();
-
-    let name: String = tbl.get_as("name").unwrap();
-    assert_eq!(name, "Alice");
-    let age: i64 = tbl.get_as("age").unwrap();
-    assert_eq!(age, 30);
-}
-
-// ============================================================================
 // to_ref / to_table_ref / to_function_ref type checks
 // ============================================================================
 

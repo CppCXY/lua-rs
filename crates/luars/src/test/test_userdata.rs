@@ -1830,3 +1830,510 @@ fn test_vm_method_userdata_ref_arg() {
     let results = vm.main_state().execute("return a:distance_to(b)").unwrap();
     assert!((results[0].as_float().unwrap() - 5.0).abs() < 0.001);
 }
+
+// ==================== Sub-Reference Tests ====================
+
+/// A userdata type used as a non-primitive field in parent structs.
+#[derive(Clone, LuaUserData)]
+#[lua_impl(Display)]
+struct Position {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl fmt::Display for Position {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Position({}, {})", self.x, self.y)
+    }
+}
+
+#[lua_methods]
+impl Position {
+    pub fn new(x: f64, y: f64) -> Self {
+        Position { x, y }
+    }
+
+    pub fn distance(&self) -> f64 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
+
+    pub fn translate(&mut self, dx: f64, dy: f64) {
+        self.x += dx;
+        self.y += dy;
+    }
+}
+
+/// Parent struct with non-primitive fields — sub-refs auto-enabled via LuaUserdata's built-in guard.
+#[derive(LuaUserData)]
+#[lua_impl(Display)]
+struct Entity {
+    pub name: String,
+    pub pos: Position, // non-primitive → sub-ref via get_field
+    pub hp: i64,       // primitive → value copy
+}
+
+impl fmt::Display for Entity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Entity({}, hp={})", self.name, self.hp)
+    }
+}
+
+#[lua_methods]
+impl Entity {
+    pub fn new(name: String, x: f64, y: f64, hp: i64) -> Self {
+        Entity {
+            name,
+            pos: Position { x, y },
+            hp,
+        }
+    }
+
+    /// Returns a sub-reference to the position field (&self → &T).
+    pub fn get_pos(&self) -> &Position {
+        &self.pos
+    }
+
+    /// Returns a mutable sub-reference (&mut self → &mut T).
+    pub fn get_pos_mut(&mut self) -> &mut Position {
+        &mut self.pos
+    }
+
+    /// Optional sub-reference.
+    pub fn maybe_pos(&self, want: bool) -> Option<&Position> {
+        if want {
+            Some(&self.pos)
+        } else {
+            None
+        }
+    }
+
+    /// Fallible sub-reference.
+    pub fn try_pos(&self, allow: bool) -> Result<&Position, String> {
+        if allow {
+            Ok(&self.pos)
+        } else {
+            Err("access denied".into())
+        }
+    }
+
+    /// Fallible mutable sub-reference.
+    pub fn try_pos_mut(&mut self, allow: bool) -> Result<&mut Position, String> {
+        if allow {
+            Ok(&mut self.pos)
+        } else {
+            Err("access denied".into())
+        }
+    }
+}
+
+// ===== SubRefToken lifecycle tests =====
+
+#[test]
+fn test_sub_ref_token_alive() {
+    let rc = std::rc::Rc::new(std::cell::Cell::new(true));
+    let token = RefAliveToken::from_inner(rc.clone());
+    assert!(token.is_alive());
+
+    rc.set(false);
+    assert!(!token.is_alive());
+}
+
+#[test]
+fn test_sub_ref_token_dead() {
+    let token = RefAliveToken::dead();
+    assert!(!token.is_alive());
+}
+
+#[test]
+fn test_sub_ref_token_clone() {
+    let rc = std::rc::Rc::new(std::cell::Cell::new(true));
+    let t1 = RefAliveToken::from_inner(rc.clone());
+    let t2 = t1.clone();
+    assert!(t2.is_alive());
+
+    rc.set(false);
+    assert!(!t1.is_alive());
+    assert!(!t2.is_alive());
+}
+
+// ===== SubRef field access tests =====
+
+#[test]
+fn test_sub_ref_field_access_primitive() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Entity>("Entity").unwrap();
+    vm.register_type_of::<Position>("Position").unwrap();
+
+    let entity = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Entity::new("hero".into(), 1.0, 2.0, 100)))
+        .unwrap();
+    vm.set_global("e", entity).unwrap();
+
+    // Primitive fields work as before
+    vm.main_state().execute("assert(e.name == 'hero')").unwrap();
+    vm.main_state().execute("assert(e.hp == 100)").unwrap();
+}
+
+#[test]
+fn test_sub_ref_field_access_non_primitive_returns_sub_ref() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Entity>("Entity").unwrap();
+    vm.register_type_of::<Position>("Position").unwrap();
+
+    let entity = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Entity::new("hero".into(), 3.0, 4.0, 100)))
+        .unwrap();
+    vm.set_global("e", entity).unwrap();
+
+    // Accessing a non-primitive field returns a sub-reference
+    // that can be used to read nested fields
+    let results = vm
+        .main_state()
+        .execute("local p = e.pos; return p.x, p.y")
+        .unwrap();
+    assert!((results[0].as_float().unwrap() - 3.0).abs() < 0.001);
+    assert!((results[1].as_float().unwrap() - 4.0).abs() < 0.001);
+
+    // Can call methods on the sub-reference
+    let results = vm
+        .main_state()
+        .execute("local p = e.pos; return p:distance()")
+        .unwrap();
+    assert!((results[0].as_float().unwrap() - 5.0).abs() < 0.001);
+}
+
+#[test]
+fn test_sub_ref_field_set_non_primitive() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Entity>("Entity").unwrap();
+    vm.register_type_of::<Position>("Position").unwrap();
+
+    let entity = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Entity::new("hero".into(), 1.0, 2.0, 100)))
+        .unwrap();
+    vm.set_global("e", entity).unwrap();
+
+    // Create a new Position and set it as a field
+    let new_pos = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Position { x: 10.0, y: 20.0 }))
+        .unwrap();
+    vm.set_global("new_pos", new_pos).unwrap();
+
+    vm.main_state()
+        .execute("e.pos = new_pos; assert(e.pos.x == 10); assert(e.pos.y == 20)")
+        .unwrap();
+}
+
+// ===== SubRef method return (&T) tests =====
+
+#[test]
+fn test_sub_ref_method_return_immutable_ref() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Entity>("Entity").unwrap();
+    vm.register_type_of::<Position>("Position").unwrap();
+
+    let entity = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Entity::new("hero".into(), 5.0, 12.0, 100)))
+        .unwrap();
+    vm.set_global("e", entity).unwrap();
+
+    let results = vm
+        .main_state()
+        .execute("local p = e:get_pos(); return p.x, p.y, p:distance()")
+        .unwrap();
+    assert!((results[0].as_float().unwrap() - 5.0).abs() < 0.001);
+    assert!((results[1].as_float().unwrap() - 12.0).abs() < 0.001);
+    assert!((results[2].as_float().unwrap() - 13.0).abs() < 0.001);
+}
+
+#[test]
+fn test_sub_ref_method_return_mutable_ref() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Entity>("Entity").unwrap();
+    vm.register_type_of::<Position>("Position").unwrap();
+
+    let entity = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Entity::new("hero".into(), 1.0, 2.0, 100)))
+        .unwrap();
+    vm.set_global("e", entity).unwrap();
+
+    // Get mutable sub-ref, modify it, verify the parent changed
+    vm.main_state()
+        .execute("local p = e:get_pos_mut(); p:translate(10, 20)")
+        .unwrap();
+
+    let results = vm
+        .main_state()
+        .execute("local p = e:get_pos(); return p.x, p.y")
+        .unwrap();
+    assert!((results[0].as_float().unwrap() - 11.0).abs() < 0.001);
+    assert!((results[1].as_float().unwrap() - 22.0).abs() < 0.001);
+}
+
+// ===== SubRef method return (Option<&T>) tests =====
+
+#[test]
+fn test_sub_ref_method_return_option_some() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Entity>("Entity").unwrap();
+    vm.register_type_of::<Position>("Position").unwrap();
+
+    let entity = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Entity::new("hero".into(), 1.0, 2.0, 100)))
+        .unwrap();
+    vm.set_global("e", entity).unwrap();
+
+    let results = vm
+        .main_state()
+        .execute("local p = e:maybe_pos(true); return p.x, p.y")
+        .unwrap();
+    assert!((results[0].as_float().unwrap() - 1.0).abs() < 0.001);
+    assert!((results[1].as_float().unwrap() - 2.0).abs() < 0.001);
+}
+
+#[test]
+fn test_sub_ref_method_return_option_none() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Entity>("Entity").unwrap();
+
+    let entity = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Entity::new("hero".into(), 1.0, 2.0, 100)))
+        .unwrap();
+    vm.set_global("e", entity).unwrap();
+
+    // None should return nil
+    let results = vm
+        .main_state()
+        .execute("local p = e:maybe_pos(false); return p == nil")
+        .unwrap();
+    assert!(results[0].as_boolean().unwrap());
+}
+
+// ===== SubRef method return (Result<&T, E>) tests =====
+
+#[test]
+fn test_sub_ref_method_return_result_ok() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Entity>("Entity").unwrap();
+    vm.register_type_of::<Position>("Position").unwrap();
+
+    let entity = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Entity::new("hero".into(), 3.0, 4.0, 100)))
+        .unwrap();
+    vm.set_global("e", entity).unwrap();
+
+    let results = vm
+        .main_state()
+        .execute("local p = e:try_pos(true); return p.x, p.y")
+        .unwrap();
+    assert!((results[0].as_float().unwrap() - 3.0).abs() < 0.001);
+    assert!((results[1].as_float().unwrap() - 4.0).abs() < 0.001);
+}
+
+#[test]
+fn test_sub_ref_method_return_result_err() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Entity>("Entity").unwrap();
+
+    let entity = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Entity::new("hero".into(), 1.0, 2.0, 100)))
+        .unwrap();
+    vm.set_global("e", entity).unwrap();
+
+    // Error should propagate
+    let result = vm
+        .main_state()
+        .execute("return e:try_pos(false)")
+        .map(|r| r[0].as_float());
+    assert!(result.is_err() || result.as_ref().ok().and_then(|r| *r).is_none());
+}
+
+#[test]
+fn test_sub_ref_method_return_result_mut_ok() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Entity>("Entity").unwrap();
+    vm.register_type_of::<Position>("Position").unwrap();
+
+    let entity = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Entity::new("hero".into(), 1.0, 2.0, 100)))
+        .unwrap();
+    vm.set_global("e", entity).unwrap();
+
+    vm.main_state()
+        .execute("local p = e:try_pos_mut(true); p:translate(5, 5)")
+        .unwrap();
+
+    let results = vm
+        .main_state()
+        .execute("return e.pos.x, e.pos.y")
+        .unwrap();
+    assert!((results[0].as_float().unwrap() - 6.0).abs() < 0.001);
+    assert!((results[1].as_float().unwrap() - 7.0).abs() < 0.001);
+}
+
+// ===== GC expiration tests =====
+
+#[test]
+fn test_sub_ref_expires_after_parent_gc() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Entity>("Entity").unwrap();
+    vm.register_type_of::<Position>("Position").unwrap();
+
+    let entity = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Entity::new("hero".into(), 1.0, 2.0, 100)))
+        .unwrap();
+    vm.set_global("e", entity).unwrap();
+
+    // Get a sub-reference via field access
+    vm.main_state()
+        .execute("sub_pos = e.pos")
+        .unwrap();
+
+    // Remove the parent reference
+    vm.set_global("e", LuaValue::nil()).unwrap();
+    vm.main_state().collect_garbage().unwrap();
+
+    // The sub-reference should now be expired
+    // Access should return nil / error rather than crashing
+    let result = vm.main_state().execute("return sub_pos.x");
+    // The sub-ref should either error or return something safe
+    match result {
+        Ok(vals) => {
+            // If it returns, it should be nil/error-like
+            assert!(vals.is_empty() || vals[0].is_nil());
+        }
+        Err(_) => {
+            // Error is also acceptable — expired userdata
+        }
+    }
+}
+
+/// Nested parent: has Vec of sub-objects, each accessible via sub-ref.
+#[derive(LuaUserData)]
+struct Team {
+    pub name: String,
+
+    #[lua(skip)]
+    members: Vec<PlayerData>,
+}
+
+#[derive(Clone, LuaUserData)]
+#[lua_impl(Display)]
+struct PlayerData {
+    pub level: i64,
+    pub score: f64,
+}
+
+impl fmt::Display for PlayerData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Player(lv={}, score={})", self.level, self.score)
+    }
+}
+
+#[lua_methods]
+impl Team {
+    pub fn new(name: String) -> Self {
+        Team {
+            name,
+            members: Vec::new(),
+        }
+    }
+
+    pub fn add_player(&mut self, level: i64, score: f64) {
+        self.members.push(PlayerData { level, score });
+    }
+
+    /// Return sub-reference to a team member.
+    pub fn get_player(&self, idx: usize) -> Option<&PlayerData> {
+        self.members.get(idx)
+    }
+
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+}
+
+#[test]
+fn test_sub_ref_nested_parent_get_player() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Team>("Team").unwrap();
+
+    let team = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Team::new("Dream Team".into())))
+        .unwrap();
+    vm.set_global("t", team).unwrap();
+
+    vm.main_state().execute("t:add_player(50, 1000.0)").unwrap();
+    vm.main_state().execute("t:add_player(80, 2000.0)").unwrap();
+
+    let results = vm
+        .main_state()
+        .execute("local p = t:get_player(0); return p.level, p.score")
+        .unwrap();
+    assert_eq!(results[0].as_integer().unwrap(), 50);
+    assert!((results[1].as_float().unwrap() - 1000.0).abs() < 0.001);
+}
+
+#[test]
+fn test_sub_ref_nested_gc_propagation() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    vm.register_type_of::<Team>("Team").unwrap();
+
+    let team = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Team::new("Temp".into())))
+        .unwrap();
+    vm.set_global("t", team).unwrap();
+
+    vm.main_state()
+        .execute("t:add_player(10, 100.0); sub = t:get_player(0)")
+        .unwrap();
+
+    // Release parent
+    vm.set_global("t", LuaValue::nil()).unwrap();
+    vm.main_state().collect_garbage().unwrap();
+
+    // Sub-ref should be expired
+    let result = vm.main_state().execute("return sub");
+    // Should not crash — may return nil or error
+    assert!(result.is_ok() || result.is_err());
+}

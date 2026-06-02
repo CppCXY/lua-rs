@@ -13,7 +13,7 @@ use luars::{
 #[cfg(feature = "sandbox")]
 use crate::LuaSandboxApi;
 use crate::lua_api::{Chunk, LuaFunction, LuaString, LuaTable, Scope, Value};
-use crate::{LuaApi, LuaAsyncApi, LuaError, LuaFullError, StackValueApi};
+use crate::{LuaApi, LuaAsyncApi, LuaError, LuaFullError, RefAliveToken, StackValueApi};
 
 /// Safe, embedding-oriented Lua runtime.
 ///
@@ -387,11 +387,12 @@ impl LuaApi for Lua {
     }
 
     #[inline]
-    unsafe fn create_userdata_ref<T: UserDataTrait + 'static>(
+    fn create_userdata_ref<T: UserDataTrait + 'static>(
         &mut self,
         reference: &mut T,
+        alive_token: RefAliveToken,
     ) -> LuaResult<UserDataRef<T>> {
-        let ud = unsafe { LuaUserdata::from_ref(reference) };
+        let ud = LuaUserdata::from_ref(reference, alive_token);
         let value = self.global_state_owner.create_userdata(ud)?;
         self.value_to_userdata(value)
     }
