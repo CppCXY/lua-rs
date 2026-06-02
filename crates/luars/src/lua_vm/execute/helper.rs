@@ -475,6 +475,10 @@ fn finishget_inner(
             if t.ttisfulluserdata()
                 && let Some(ud) = t.as_userdata_mut()
             {
+                // Check for expired sub-reference
+                if let Err(msg) = ud.check_alive_or_error() {
+                    return Err(lua_state.error(msg));
+                }
                 // Try trait-based get_field (key must be a string)
                 // This handles both field access AND method lookup
                 // (methods return UdValue::Function(cfunction))
@@ -1600,13 +1604,18 @@ fn finishget_to_reg_inner(
         } else {
             if t.ttisfulluserdata()
                 && let Some(ud) = t.as_userdata_mut()
-                && let Some(key_str) = key.as_str()
-                && let Some(udv) = ud.get_trait().get_field(key_str)
             {
-                let token = ud.sub_guard_token();
-                let result = udvalue_to_lua_value_with_token(lua_state, udv, token)?;
-                setobj2s(lua_state, dest_reg, &result);
-                return Ok(());
+                if let Err(msg) = ud.check_alive_or_error() {
+                    return Err(lua_state.error(msg));
+                }
+                if let Some(key_str) = key.as_str()
+                    && let Some(udv) = ud.get_trait().get_field(key_str)
+                {
+                    let token = ud.sub_guard_token();
+                    let result = udvalue_to_lua_value_with_token(lua_state, udv, token)?;
+                    setobj2s(lua_state, dest_reg, &result);
+                    return Ok(());
+                }
             }
 
             match get_metamethod_event(lua_state, &t, TmKind::Index) {

@@ -1,7 +1,7 @@
 use std::{any::Any, fmt};
 
-use crate::lua_vm::CFunction;
 use crate::{LuaValue, RefAliveToken, UdValue, UserDataTrait, gc::TablePtr};
+use crate::lua_vm::CFunction;
 
 /// Userdata storage — either owns the data or borrows it via raw pointer.
 ///
@@ -12,98 +12,41 @@ pub enum UserdataStorage {
     Borrowed(*mut dyn UserDataTrait),
 }
 
-/// Sentinel userdata returned for expired sub-references.
-/// All methods return nil / error / unsupported.
+/// Dead sentinel returned when accessing expired borrowed userdata.
+/// Viable as a safety net — all paths return nil/None/error.
 struct DeadUserdata;
 
 impl UserDataTrait for DeadUserdata {
-    fn type_name(&self) -> &'static str {
-        "expired_userdata"
-    }
-
-    fn get_field(&self, _key: &str) -> Option<UdValue> {
-        None
-    }
-
+    fn type_name(&self) -> &'static str { "expired_userdata" }
+    fn get_field(&self, _key: &str) -> Option<UdValue> { None }
     fn set_field(&mut self, _key: &str, _value: UdValue) -> Option<Result<(), String>> {
         Some(Err("cannot modify expired sub-reference".into()))
     }
-
-    fn lua_tostring(&self) -> Option<String> {
-        None
-    }
-    fn lua_eq(&self, _other: &dyn UserDataTrait) -> Option<bool> {
-        None
-    }
-    fn lua_lt(&self, _other: &dyn UserDataTrait) -> Option<bool> {
-        None
-    }
-    fn lua_le(&self, _other: &dyn UserDataTrait) -> Option<bool> {
-        None
-    }
-    fn lua_len(&self) -> Option<UdValue> {
-        None
-    }
-    fn lua_unm(&self) -> Option<UdValue> {
-        None
-    }
-    fn lua_bnot(&self) -> Option<UdValue> {
-        None
-    }
-    fn lua_add(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_sub(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_mul(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_div(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_mod(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_pow(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_idiv(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_band(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_bor(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_bxor(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_shl(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_shr(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_concat(&self, _other: &UdValue) -> Option<UdValue> {
-        None
-    }
-    fn lua_call(&self) -> Option<CFunction> {
-        None
-    }
-    fn lua_next(&self, _control: &UdValue) -> Option<(UdValue, UdValue)> {
-        None
-    }
-    fn field_names(&self) -> &'static [&'static str] {
-        &[]
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+    fn lua_tostring(&self) -> Option<String> { None }
+    fn lua_eq(&self, _other: &dyn UserDataTrait) -> Option<bool> { None }
+    fn lua_lt(&self, _other: &dyn UserDataTrait) -> Option<bool> { None }
+    fn lua_le(&self, _other: &dyn UserDataTrait) -> Option<bool> { None }
+    fn lua_len(&self) -> Option<UdValue> { None }
+    fn lua_unm(&self) -> Option<UdValue> { None }
+    fn lua_bnot(&self) -> Option<UdValue> { None }
+    fn lua_add(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_sub(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_mul(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_div(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_mod(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_pow(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_idiv(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_band(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_bor(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_bxor(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_shl(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_shr(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_concat(&self, _other: &UdValue) -> Option<UdValue> { None }
+    fn lua_call(&self) -> Option<CFunction> { None }
+    fn lua_next(&self, _control: &UdValue) -> Option<(UdValue, UdValue)> { None }
+    fn field_names(&self) -> &'static [&'static str] { &[] }
+    fn as_any(&self) -> &dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any { self }
 }
 
 /// Userdata - arbitrary Rust data with optional metatable.
@@ -182,10 +125,13 @@ impl LuaUserdata {
         }
     }
 
-    // ==================== Trait-based access (with liveness check) ====================
+    // ==================== Trait-based access ====================
 
-    /// Get the trait object. For borrowed storage, returns a dead sentinel if
-    /// the token has expired.
+    /// Get the trait object. For expired borrowed userdata, returns a dead
+    /// sentinel that yields nil/None for all operations.
+    ///
+    /// Callers should prefer `check_alive_or_error()` for explicit error messages
+    /// at key entry points.
     #[inline]
     pub fn get_trait(&self) -> &dyn UserDataTrait {
         match &self.data {
@@ -201,8 +147,8 @@ impl LuaUserdata {
         }
     }
 
-    /// Get the mutable trait object. For borrowed storage, returns a dead
-    /// sentinel if the token has expired.
+    /// Get the mutable trait object. For expired borrowed userdata, returns a
+    /// dead sentinel.
     #[inline]
     pub fn get_trait_mut(&mut self) -> &mut dyn UserDataTrait {
         match &mut self.data {
@@ -211,10 +157,21 @@ impl LuaUserdata {
                 if self.alive_token.is_alive() {
                     unsafe { &mut **ptr }
                 } else {
-                    // Leak a dead sentinel — ZST, minimal overhead, only on error path
+                    // Leak is acceptable — only on error path, ZST
                     Box::leak(Box::new(DeadUserdata))
                 }
             }
+        }
+    }
+
+    /// Returns `Ok(())` if this userdata is safe to access, or an error
+    /// with a descriptive message if the backing data has expired.
+    #[inline]
+    pub fn check_alive_or_error(&self) -> Result<(), String> {
+        if !self.is_alive() {
+            Err("attempt to use an expired reference — the owning userdata has been garbage collected".into())
+        } else {
+            Ok(())
         }
     }
 

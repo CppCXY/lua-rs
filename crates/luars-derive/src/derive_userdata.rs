@@ -30,10 +30,42 @@ use crate::type_utils::{
 
 fn gen_lua_convert_impls(name: &Ident) -> proc_macro2::TokenStream {
     quote! {
+        // Owned value → owned userdata
         impl luars::IntoLua for #name {
             fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
                 let userdata = state
                     .create_userdata(luars::LuaUserdata::new(self))
+                    .map_err(|e| format!("{:?}", e))?;
+                state.push_value(userdata).map_err(|e| format!("{:?}", e))?;
+                Ok(1)
+            }
+        }
+
+        // Reference → borrowed userdata (uses a standalone alive token;
+        // the caller must ensure the reference outlives Lua access)
+        impl luars::IntoLua for &#name {
+            fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
+                let ud = luars::LuaUserdata::from_ptr(
+                    self as *const #name,
+                    luars::RefAliveToken::default(),
+                );
+                let userdata = state
+                    .create_userdata(ud)
+                    .map_err(|e| format!("{:?}", e))?;
+                state.push_value(userdata).map_err(|e| format!("{:?}", e))?;
+                Ok(1)
+            }
+        }
+
+        // Mutable reference → borrowed userdata
+        impl luars::IntoLua for &mut #name {
+            fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
+                let ud = luars::LuaUserdata::from_ptr(
+                    self as *const #name,
+                    luars::RefAliveToken::default(),
+                );
+                let userdata = state
+                    .create_userdata(ud)
                     .map_err(|e| format!("{:?}", e))?;
                 state.push_value(userdata).map_err(|e| format!("{:?}", e))?;
                 Ok(1)
