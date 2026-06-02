@@ -21,9 +21,17 @@ pub fn normalize_type(ty: &syn::Type) -> String {
 pub fn is_primitive_type(normalized: &str) -> bool {
     matches!(
         normalized,
-        "i8" | "i16" | "i32" | "i64" | "isize"
-            | "u8" | "u16" | "u32" | "u64" | "usize"
-            | "f32" | "f64"
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "usize"
+            | "f32"
+            | "f64"
             | "bool"
             | "String"
     )

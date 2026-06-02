@@ -1900,11 +1900,7 @@ impl Entity {
 
     /// Optional sub-reference.
     pub fn maybe_pos(&self, want: bool) -> Option<&Position> {
-        if want {
-            Some(&self.pos)
-        } else {
-            None
-        }
+        if want { Some(&self.pos) } else { None }
     }
 
     /// Fallible sub-reference.
@@ -2194,10 +2190,7 @@ fn test_sub_ref_method_return_result_mut_ok() {
         .execute("local p = e:try_pos_mut(true); p:translate(5, 5)")
         .unwrap();
 
-    let results = vm
-        .main_state()
-        .execute("return e.pos.x, e.pos.y")
-        .unwrap();
+    let results = vm.main_state().execute("return e.pos.x, e.pos.y").unwrap();
     assert!((results[0].as_float().unwrap() - 6.0).abs() < 0.001);
     assert!((results[1].as_float().unwrap() - 7.0).abs() < 0.001);
 }
@@ -2219,9 +2212,7 @@ fn test_sub_ref_expires_after_parent_gc() {
     vm.set_global("e", entity).unwrap();
 
     // Get a sub-reference via field access
-    vm.main_state()
-        .execute("sub_pos = e.pos")
-        .unwrap();
+    vm.main_state().execute("sub_pos = e.pos").unwrap();
 
     // Remove the parent reference
     vm.set_global("e", LuaValue::nil()).unwrap();

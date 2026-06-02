@@ -55,9 +55,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, ItemImpl, Pat, ReturnType, parse_macro_input};
 
-use crate::type_utils::{
-    normalize_type, strip_reference, unwrap_outer_type, WrapperKind,
-};
+use crate::type_utils::{WrapperKind, normalize_type, strip_reference, unwrap_outer_type};
 
 /// Kind of method discovered in the impl block.
 enum MethodKind {
@@ -72,6 +70,7 @@ enum MethodKind {
 // ==================== Sub-reference return detection & wrapping ====================
 
 /// Result of analyzing a method return type for sub-reference wrapping.
+#[allow(clippy::enum_variant_names)]
 enum SubRefReturnKind {
     /// Return type is `&T` or `&mut T` — needs SubRef wrapping.
     DirectRef,
@@ -89,17 +88,17 @@ fn classify_subref_return(normalized: &str) -> Option<SubRefReturnKind> {
     }
 
     // Option<&T> or Option<&mut T>
-    if let Some((inner, WrapperKind::Option)) = unwrap_outer_type(normalized) {
-        if strip_reference(inner).is_some() {
-            return Some(SubRefReturnKind::OptionRef);
-        }
+    if let Some((inner, WrapperKind::Option)) = unwrap_outer_type(normalized)
+        && strip_reference(inner).is_some()
+    {
+        return Some(SubRefReturnKind::OptionRef);
     }
 
     // Result<&T, E> or Result<&mut T, E>
-    if let Some((inner, WrapperKind::Result)) = unwrap_outer_type(normalized) {
-        if strip_reference(inner).is_some() {
-            return Some(SubRefReturnKind::ResultRef);
-        }
+    if let Some((inner, WrapperKind::Result)) = unwrap_outer_type(normalized)
+        && strip_reference(inner).is_some()
+    {
+        return Some(SubRefReturnKind::ResultRef);
     }
 
     None
@@ -135,9 +134,7 @@ fn gen_subref_return_expr(
     token_expr: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     match kind {
-        SubRefReturnKind::DirectRef => {
-            gen_subref_push_with_token(result_expr, token_expr)
-        }
+        SubRefReturnKind::DirectRef => gen_subref_push_with_token(result_expr, token_expr),
         SubRefReturnKind::OptionRef => {
             quote! {
                 match #result_expr {
@@ -610,8 +607,7 @@ fn gen_ref_call(
     let call_expr = quote! { __this.#method_name(#(#param_names),*) };
 
     let return_block = if let Some(ref kind) = subref_kind {
-        let subref_body = gen_subref_return_expr(call_expr, kind, quote! { __token });
-        subref_body
+        gen_subref_return_expr(call_expr, kind, quote! { __token })
     } else {
         let push = gen_return_push(self_ty, return_type);
         match return_type {
@@ -663,8 +659,7 @@ fn gen_mut_call(
     let call_expr = quote! { __this.#method_name(#(#param_names),*) };
 
     let return_block = if let Some(ref kind) = subref_kind {
-        let subref_body = gen_subref_return_expr(call_expr, kind, quote! { __token });
-        subref_body
+        gen_subref_return_expr(call_expr, kind, quote! { __token })
     } else {
         let push = gen_return_push(self_ty, return_type);
         match return_type {

@@ -14,7 +14,7 @@ pub use chunk::Chunk;
 pub use function::LuaFunction;
 pub use lua::Lua;
 pub use lua_string::LuaString;
-pub use scope::{Scope, ScopedFunction, ScopedUserData};
+pub use scope::{Scope, ScopedFunction};
 pub use table::LuaTable;
 pub use value::Value;
 

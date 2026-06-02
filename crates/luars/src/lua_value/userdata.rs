@@ -1,7 +1,7 @@
 use std::{any::Any, fmt};
 
-use crate::{LuaValue, RefAliveToken, UdValue, UserDataTrait, gc::TablePtr};
 use crate::lua_vm::CFunction;
+use crate::{LuaValue, RefAliveToken, UdValue, UserDataTrait, gc::TablePtr};
 
 /// Userdata storage — either owns the data or borrows it via raw pointer.
 ///
@@ -17,39 +17,93 @@ pub enum UserdataStorage {
 struct DeadUserdata;
 
 impl UserDataTrait for DeadUserdata {
-    fn type_name(&self) -> &'static str { "expired_userdata" }
+    fn type_name(&self) -> &'static str {
+        "expired_userdata"
+    }
 
-    fn get_field(&self, _key: &str) -> Option<UdValue> { None }
+    fn get_field(&self, _key: &str) -> Option<UdValue> {
+        None
+    }
 
     fn set_field(&mut self, _key: &str, _value: UdValue) -> Option<Result<(), String>> {
         Some(Err("cannot modify expired sub-reference".into()))
     }
 
-    fn lua_tostring(&self) -> Option<String> { None }
-    fn lua_eq(&self, _other: &dyn UserDataTrait) -> Option<bool> { None }
-    fn lua_lt(&self, _other: &dyn UserDataTrait) -> Option<bool> { None }
-    fn lua_le(&self, _other: &dyn UserDataTrait) -> Option<bool> { None }
-    fn lua_len(&self) -> Option<UdValue> { None }
-    fn lua_unm(&self) -> Option<UdValue> { None }
-    fn lua_bnot(&self) -> Option<UdValue> { None }
-    fn lua_add(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_sub(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_mul(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_div(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_mod(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_pow(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_idiv(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_band(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_bor(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_bxor(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_shl(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_shr(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_concat(&self, _other: &UdValue) -> Option<UdValue> { None }
-    fn lua_call(&self) -> Option<CFunction> { None }
-    fn lua_next(&self, _control: &UdValue) -> Option<(UdValue, UdValue)> { None }
-    fn field_names(&self) -> &'static [&'static str] { &[] }
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn lua_tostring(&self) -> Option<String> {
+        None
+    }
+    fn lua_eq(&self, _other: &dyn UserDataTrait) -> Option<bool> {
+        None
+    }
+    fn lua_lt(&self, _other: &dyn UserDataTrait) -> Option<bool> {
+        None
+    }
+    fn lua_le(&self, _other: &dyn UserDataTrait) -> Option<bool> {
+        None
+    }
+    fn lua_len(&self) -> Option<UdValue> {
+        None
+    }
+    fn lua_unm(&self) -> Option<UdValue> {
+        None
+    }
+    fn lua_bnot(&self) -> Option<UdValue> {
+        None
+    }
+    fn lua_add(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_sub(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_mul(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_div(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_mod(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_pow(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_idiv(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_band(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_bor(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_bxor(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_shl(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_shr(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_concat(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+    fn lua_call(&self) -> Option<CFunction> {
+        None
+    }
+    fn lua_next(&self, _control: &UdValue) -> Option<(UdValue, UdValue)> {
+        None
+    }
+    fn field_names(&self) -> &'static [&'static str] {
+        &[]
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 /// Userdata - arbitrary Rust data with optional metatable.

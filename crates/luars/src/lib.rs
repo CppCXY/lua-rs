@@ -37,8 +37,8 @@ pub use lua_value::LuaUserdata;
 pub use lua_value::UserDataBuilder;
 pub use lua_value::alive_ref::RefAliveToken;
 pub use lua_value::userdata_trait::{
-    LuaEnum, LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, OpaqueUserData,
-    UdValue, UserDataTrait,
+    LuaEnum, LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, OpaqueUserData, UdValue,
+    UserDataTrait,
 };
 
 pub use lib_registry::{LibraryModule, LibraryRegistry, LuaLibrary, PreloadModule};

@@ -1,6 +1,4 @@
-use std::cell::Cell;
 use std::marker::PhantomData;
-use std::rc::Rc;
 
 use crate::{
     Chunk, FromLua, FromLuaMulti, IntoLua, LuaError, LuaFunction, LuaResult, LuaState, LuaTable,
@@ -206,7 +204,7 @@ fn scoped_expired_error() -> &'static str {
 /// Lexical scope for non-`'static` Lua values.
 pub struct Scope<'scope, 'lua> {
     lua: &'scope mut Lua,
-    active: Rc<Cell<bool>>,
+    ref_token: RefAliveToken,
     callbacks: Vec<CallbackResource<'scope>>,
     _lua: PhantomData<&'lua mut Lua>,
 }
@@ -215,7 +213,7 @@ impl<'scope, 'lua> Scope<'scope, 'lua> {
     pub(crate) fn new(lua: &'scope mut Lua) -> Self {
         Scope {
             lua,
-            active: Rc::new(Cell::new(true)),
+            ref_token: RefAliveToken::default(),
             callbacks: Vec::new(),
             _lua: PhantomData,
         }
@@ -248,9 +246,9 @@ impl<'scope, 'lua> Scope<'scope, 'lua> {
         let callback_ptr = callback.ptr as usize;
         self.callbacks.push(callback);
 
-        let active = self.active.clone();
+        let active = self.ref_token.clone();
         let function = self.lua.create_raw_function(move |state| {
-            if !active.get() {
+            if !active.is_alive() {
                 return Err(state.error(scoped_expired_error().to_owned()));
             }
 
@@ -275,9 +273,9 @@ impl<'scope, 'lua> Scope<'scope, 'lua> {
         let data_ptr = (data as *const Data).cast::<()>() as usize;
         self.callbacks.push(callback);
 
-        let active = self.active.clone();
+        let active = self.ref_token.clone();
         let function = self.lua.create_raw_function(move |state| {
-            if !active.get() {
+            if !active.is_alive() {
                 return Err(state.error(scoped_expired_error().to_owned()));
             }
 
@@ -303,9 +301,9 @@ impl<'scope, 'lua> Scope<'scope, 'lua> {
         let data_ptr = (data as *mut Data).cast::<()>() as usize;
         self.callbacks.push(callback);
 
-        let active = self.active.clone();
+        let active = self.ref_token.clone();
         let function = self.lua.create_raw_function(move |state| {
-            if !active.get() {
+            if !active.is_alive() {
                 return Err(state.error(scoped_expired_error().to_owned()));
             }
 
@@ -326,18 +324,18 @@ impl<'scope, 'lua> Scope<'scope, 'lua> {
         &mut self,
         reference: &mut T,
     ) -> LuaResult<ScopedUserData<'scope, T>> {
-        let token = RefAliveToken::from_inner(self.active.clone());
+        let token = self.ref_token.clone();
         let ptr = reference as *mut T;
-        let ud = LuaUserdata::from_ref(reference, token);
+        let ud = LuaUserdata::from_ref(reference, token.clone());
         let value = self.lua.global_state_mut().create_userdata(ud)?;
         let userdata_value = Value::new(self.lua.global_state_mut().to_ref(value));
-        Ok(ScopedUserData::new(userdata_value, ptr, self.active.clone()))
+        Ok(ScopedUserData::new(userdata_value, ptr, token))
     }
 }
 
 impl Drop for Scope<'_, '_> {
     fn drop(&mut self) {
-        self.active.set(false);
+        self.ref_token.set(false);
     }
 }
 
@@ -384,29 +382,29 @@ impl IntoLua for &ScopedFunction<'_, '_> {
 pub struct ScopedUserData<'scope, T: UserDataTrait> {
     inner: Value,
     ptr: *mut T,
-    active: Rc<Cell<bool>>,
+    alive_token: RefAliveToken,
     _marker: PhantomData<&'scope mut T>,
 }
 
 impl<'scope, T: UserDataTrait> ScopedUserData<'scope, T> {
-    fn new(inner: Value, ptr: *mut T, active: Rc<Cell<bool>>) -> Self {
+    fn new(inner: Value, ptr: *mut T, alive_token: RefAliveToken) -> Self {
         ScopedUserData {
             inner,
             ptr,
-            active,
+            alive_token,
             _marker: PhantomData,
         }
     }
 
     pub fn get(&self) -> LuaResult<&T> {
-        if !self.active.get() {
+        if !self.alive_token.is_alive() {
             return Err(LuaError::RuntimeError);
         }
         Ok(unsafe { &*self.ptr })
     }
 
     pub fn get_mut(&mut self) -> LuaResult<&mut T> {
-        if !self.active.get() {
+        if !self.alive_token.is_alive() {
             return Err(LuaError::RuntimeError);
         }
         Ok(unsafe { &mut *self.ptr })
