@@ -1836,6 +1836,74 @@ fn test_vm_method_userdata_ref_arg() {
     assert!((results[0].as_float().unwrap() - 5.0).abs() < 0.001);
 }
 
+// ==================== Generic Struct Tests ====================
+
+/// A generic container — generic fields are auto-skipped.
+#[allow(dead_code)]
+#[derive(LuaUserData)]
+struct Container<T> {
+    pub label: String, // concrete → exposed
+    item: T,           // generic → auto-skipped
+}
+
+#[test]
+fn test_generic_container_field_access() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    let container = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Container::<Position> {
+            label: "test".into(),
+            item: Position { x: 3.0, y: 4.0 },
+        }))
+        .unwrap();
+    vm.set_global("c", container).unwrap();
+
+    // Concrete field accessible
+    let results = vm.main_state().execute("return c.label").unwrap();
+    assert_eq!(results[0].as_str(), Some("test"));
+
+    // Generic field NOT accessible (auto-skipped)
+    let result = vm.main_state().execute("return c.item");
+    assert!(result.is_err() || result.unwrap()[0].is_nil());
+}
+
+/// Two generic params — both auto-skipped, only concrete fields exposed.
+#[allow(dead_code)]
+#[derive(LuaUserData)]
+struct Pair<A, B> {
+    pub count: i64,
+    first: A,
+    second: B,
+}
+
+#[test]
+fn test_generic_pair_derives() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::Basic).unwrap();
+
+    let pair = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(Pair {
+            count: 42,
+            first: Position { x: 1.0, y: 2.0 },
+            second: Position { x: 10.0, y: 20.0 },
+        }))
+        .unwrap();
+    vm.set_global("p", pair).unwrap();
+
+    // Concrete field works
+    let results = vm.main_state().execute("return p.count").unwrap();
+    assert_eq!(results[0].as_integer(), Some(42));
+
+    // Generic fields are not accessible
+    assert!(
+        vm.main_state().execute("return p.first").is_err()
+            || vm.main_state().execute("return p.first").unwrap()[0].is_nil()
+    );
+}
+
 // ==================== Sub-Reference Tests ====================
 
 /// A userdata type used as a non-primitive field in parent structs.

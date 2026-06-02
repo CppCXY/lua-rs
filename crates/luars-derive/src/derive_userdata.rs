@@ -22,19 +22,57 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Ident, Meta};
+use syn::{Data, DeriveInput, Fields, GenericParam, Ident, Meta};
 
 use crate::type_utils::{
     field_to_udvalue, is_primitive_type, is_ref_alive_token_type, normalize_type, ref_to_udvalue,
     udvalue_to_field,
 };
 
+/// Determine whether a type references one of the struct's own generic type
+/// parameters. Used to skip fields whose types cannot be statically resolved.
+fn type_uses_own_param(type_str: &str, generics: &syn::Generics) -> bool {
+    for param in &generics.params {
+        if let GenericParam::Type(tp) = param {
+            let name = tp.ident.to_string();
+            if type_uses_ident(type_str, &name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if `param_name` appears as a word boundary in `type_str`.
+fn type_uses_ident(type_str: &str, param_name: &str) -> bool {
+    let bytes = type_str.as_bytes();
+    let param = param_name.as_bytes();
+    let plen = param.len();
+    if plen == 0 {
+        return false;
+    }
+    let mut pos = 0;
+    while let Some(found) = bytes[pos..].windows(plen).position(|w| w == param) {
+        let idx = pos + found;
+        let before_ok = idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric();
+        let after_ok = idx + plen >= bytes.len() || !bytes[idx + plen].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        pos = idx + plen;
+    }
+    false
+}
+
 fn gen_lua_convert_impls(
     name: &Ident,
+    generics: &syn::Generics,
     ref_token_field: Option<&Ident>,
 ) -> proc_macro2::TokenStream {
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
     let owned_impl = quote! {
-        impl luars::IntoLua for #name {
+        impl #impl_generics luars::IntoLua for #name #ty_generics #where_clause {
             fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
                 let userdata = state
                     .create_userdata(luars::LuaUserdata::new(self))
@@ -47,10 +85,13 @@ fn gen_lua_convert_impls(
 
     let ref_impls = ref_token_field.map(|field| {
         quote! {
-            impl luars::IntoLua for &#name {
+            impl #impl_generics luars::IntoLua for &#name #ty_generics #where_clause {
                 fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
                     let token = self.#field.clone();
-                    let ud = luars::LuaUserdata::from_ptr(self as *const #name, token);
+                    let ud = luars::LuaUserdata::from_ptr(
+                        self as *const #name #ty_generics,
+                        token,
+                    );
                     let userdata = state
                         .create_userdata(ud)
                         .map_err(|e| format!("{:?}", e))?;
@@ -59,10 +100,13 @@ fn gen_lua_convert_impls(
                 }
             }
 
-            impl luars::IntoLua for &mut #name {
+            impl #impl_generics luars::IntoLua for &mut #name #ty_generics #where_clause {
                 fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
                     let token = self.#field.clone();
-                    let ud = luars::LuaUserdata::from_ptr(self as *const #name, token);
+                    let ud = luars::LuaUserdata::from_ptr(
+                        self as *const #name #ty_generics,
+                        token,
+                    );
                     let userdata = state
                         .create_userdata(ud)
                         .map_err(|e| format!("{:?}", e))?;
@@ -111,6 +155,7 @@ fn extract_vec_element_type(ty: &syn::Type) -> Option<&syn::Type> {
 /// Entry point for `#[derive(LuaUserData)]`.
 pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
     let name = &input.ident;
+    let generics = &input.generics;
 
     // Parse #[lua_impl(...)] attribute for trait detection
     let trait_impls = parse_lua_impl_attrs(&input);
@@ -124,7 +169,7 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
             _ => None, // tuple or unit struct — no field export
         },
         Data::Enum(data) => {
-            return derive_lua_enum_userdata_impl(name, data, &trait_impls, &delegates);
+            return derive_lua_enum_userdata_impl(name, data, generics, &trait_impls, &delegates);
         }
         _ => {
             return syn::Error::new_spanned(
@@ -138,7 +183,7 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
 
     // If no named fields (tuple/unit struct), generate minimal impl
     if fields_named.is_none() {
-        return gen_minimal_impl(name, &trait_impls, &delegates);
+        return gen_minimal_impl(name, generics, &trait_impls, &delegates);
     }
     let fields = fields_named.unwrap();
 
@@ -221,6 +266,12 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
         }
 
         if skip || !is_pub {
+            continue;
+        }
+
+        // Skip fields whose type depends on the struct's own generic params —
+        // we can't statically determine how to convert them.
+        if type_uses_own_param(&normalize_type(ty), generics) {
             continue;
         }
 
@@ -331,11 +382,20 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
         quote! {}
     };
 
+    // All generic params need `'static` — required by UserDataTrait: 'static
+    let mut generics = generics.clone();
+    for param in &mut generics.params {
+        if let GenericParam::Type(tp) = param {
+            tp.bounds.push(syn::parse_quote!('static));
+        }
+    }
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
     let type_name_str = name.to_string();
-    let lua_convert_impls = gen_lua_convert_impls(name, ref_token_field.as_ref());
+    let lua_convert_impls = gen_lua_convert_impls(name, &generics, ref_token_field.as_ref());
 
     let expanded = quote! {
-        impl luars::UserDataTrait for #name {
+        impl #impl_generics luars::UserDataTrait for #name #ty_generics #where_clause {
             fn type_name(&self) -> &'static str {
                 #type_name_str
             }
@@ -604,16 +664,20 @@ fn gen_metamethods(name: &Ident, trait_impls: &[String]) -> proc_macro2::TokenSt
 // ==================== Minimal impl for tuple/unit structs ====================
 
 /// Generate a minimal UserDataTrait impl for tuple or unit structs.
-///
-/// No field access — only type_name, method lookup, metamethods, and as_any.
-fn gen_minimal_impl(name: &Ident, trait_impls: &[String], delegates: &LuaDelegates) -> TokenStream {
+fn gen_minimal_impl(
+    name: &Ident,
+    generics: &syn::Generics,
+    trait_impls: &[String],
+    delegates: &LuaDelegates,
+) -> TokenStream {
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let type_name_str = name.to_string();
     let metamethod_impls = gen_metamethods(name, trait_impls);
     let delegate_impls = gen_delegate_methods(delegates);
-    let lua_convert_impls = gen_lua_convert_impls(name, None::<&Ident>);
+    let lua_convert_impls = gen_lua_convert_impls(name, generics, None::<&Ident>);
 
     let expanded = quote! {
-        impl luars::UserDataTrait for #name {
+        impl #impl_generics luars::UserDataTrait for #name #ty_generics #where_clause {
             fn type_name(&self) -> &'static str {
                 #type_name_str
             }
@@ -649,10 +713,12 @@ fn gen_minimal_impl(name: &Ident, trait_impls: &[String], delegates: &LuaDelegat
 fn derive_lua_enum_userdata_impl(
     name: &Ident,
     data: &syn::DataEnum,
+    generics: &syn::Generics,
     trait_impls: &[String],
     delegates: &LuaDelegates,
 ) -> TokenStream {
-    let mut tokens = proc_macro2::TokenStream::from(gen_minimal_impl(name, trait_impls, delegates));
+    let mut tokens =
+        proc_macro2::TokenStream::from(gen_minimal_impl(name, generics, trait_impls, delegates));
 
     if data
         .variants

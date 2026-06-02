@@ -329,16 +329,16 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    // Extract generics for the generated impl blocks
+    let (impl_generics, _ty_generics, where_clause) = item_impl.generics.split_for_impl();
+
     let expanded = quote! {
         // Re-emit the original impl block with #[lua(...)] attributes stripped
         #cleaned_impl
 
         // Additional impl block with lookup + static method registration
-        impl #self_ty {
+        impl #impl_generics #self_ty #where_clause {
             /// Look up a Lua-callable wrapper function by instance method name.
-            ///
-            /// This inherent method shadows the blanket `LuaMethodProvider` trait default,
-            /// so `#[derive(LuaUserData)]`'s `get_field` will find methods here.
             #[allow(unused)]
             pub fn __lua_lookup_method(key: &str) -> Option<luars::CFunction> {
                 #(#instance_wrapper_fns)*
@@ -350,10 +350,6 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
             }
 
             /// Return all static (associated) methods for type registration.
-            ///
-            /// This inherent method shadows the blanket `LuaStaticMethodProvider`
-            /// trait default, providing entries for `register_type` to populate
-            /// the class table (e.g. `Point.new`).
             #[allow(unused)]
             pub fn __lua_static_methods() -> &'static [(&'static str, luars::CFunction)] {
                 #(#static_wrapper_fns)*
@@ -362,10 +358,8 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Explicit trait impl for LuaRegistrable — enables register_type_of::<T>.
-        // Unlike the blanket LuaStaticMethodProvider, this dispatches to the
-        // actual generated methods rather than returning &[].
-        impl luars::LuaRegistrable for #self_ty {
+        // Explicit trait impl for LuaRegistrable.
+        impl #impl_generics luars::LuaRegistrable for #self_ty #where_clause {
             fn lua_static_methods() -> &'static [(&'static str, luars::CFunction)] {
                 #self_ty::__lua_static_methods()
             }
