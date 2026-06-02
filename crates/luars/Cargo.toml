@@ -23,7 +23,7 @@ shared-proto = []
 # SAFETY: the caller must ensure no concurrent access — the VM is
 # still single-threaded internally (Rc, raw pointers, etc.). This
 # flag exists purely to satisfy framework bounds (e.g. axum, tokio).
-send = []
+unsafe-send = []
 
 [dependencies]
 # local

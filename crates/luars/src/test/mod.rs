@@ -25,6 +25,6 @@ pub mod test_gc_metamethods;
 pub mod test_rclosure;
 #[cfg(feature = "sandbox")]
 pub mod test_sandbox;
-#[cfg(feature = "send")]
+#[cfg(feature = "unsafe-send")]
 pub mod test_send;
 pub mod test_user_api;
