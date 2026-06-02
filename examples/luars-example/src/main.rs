@@ -25,12 +25,12 @@ impl Counter {
 
 fn main() -> LuaResult<()> {
     let mut lua = Lua::new(SafeOption::default());
-    lua.load_stdlibs(Stdlib::All)?;
+    lua.open_stdlib(Stdlib::All)?;
 
     lua.register_function("slugify", |name: String| {
         name.trim().to_lowercase().replace(' ', "-")
     })?;
-    lua.register_type::<Counter>("Counter")?;
+    lua.register_type_of::<Counter>("Counter")?;
 
     let config = lua.create_table_from([("host", "localhost"), ("mode", "demo")])?;
     lua.globals().set("config", config)?;

@@ -63,9 +63,9 @@ fn main() {
 
 fn run_benchmarks() -> LuaResult<()> {
     let mut lua = Lua::new(SafeOption::default());
-    lua.load_stdlibs(Stdlib::All)?;
-    lua.register_type::<Vec2>("Vec2")?;
-    lua.register_type::<Counter>("Counter")?;
+    lua.open_stdlib(Stdlib::All)?;
+    lua.register_type_of::<Vec2>("Vec2")?;
+    lua.register_type_of::<Counter>("Counter")?;
     lua.load(BENCH_LUA).set_name("rust_bind_bench.lua").exec()?;
     Ok(())
 }

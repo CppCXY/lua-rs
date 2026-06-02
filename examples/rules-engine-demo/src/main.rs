@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use luars::LuaApi;
-use luars::{Lua, SafeOption, Stdlib, Table};
+use luars::{Lua, LuaTable, SafeOption, Stdlib};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -70,7 +70,7 @@ fn run() -> AppResult<()> {
     let (script_name, script_source) = load_script(script_path.as_deref())?;
 
     let mut lua = Lua::new(SafeOption::default());
-    lua.load_stdlibs(Stdlib::All)?;
+    lua.open_stdlib(Stdlib::All)?;
     register_host_functions(&mut lua)?;
     lua.load(&script_source).set_name(&script_name).exec()?;
 
@@ -250,7 +250,7 @@ fn sample_orders() -> Vec<Order> {
     ]
 }
 
-fn build_order_table(lua: &mut Lua, order: &Order) -> AppResult<Table> {
+fn build_order_table(lua: &mut Lua, order: &Order) -> AppResult<LuaTable> {
     let customer = lua.create_table()?;
     customer.set("email", order.customer.email)?;
     customer.set("country", order.customer.country)?;
@@ -272,7 +272,7 @@ fn build_order_table(lua: &mut Lua, order: &Order) -> AppResult<Table> {
     Ok(table)
 }
 
-fn build_line_item(lua: &mut Lua, item: &LineItem) -> AppResult<Table> {
+fn build_line_item(lua: &mut Lua, item: &LineItem) -> AppResult<LuaTable> {
     let table = lua.create_table()?;
     table.set("sku", item.sku)?;
     table.set("category", item.category)?;
@@ -281,9 +281,9 @@ fn build_line_item(lua: &mut Lua, item: &LineItem) -> AppResult<Table> {
     Ok(table)
 }
 
-fn evaluate_order(lua: &mut Lua, order: Table) -> AppResult<Decision> {
-    let decision: Table = lua.call_global1("evaluate_order", order)?;
-    let tags: Table = decision.get("tags")?;
+fn evaluate_order(lua: &mut Lua, order: LuaTable) -> AppResult<Decision> {
+    let decision: LuaTable = lua.call_global1("evaluate_order", order)?;
+    let tags: LuaTable = decision.get("tags")?;
 
     Ok(Decision {
         approved: decision.get("approved")?,

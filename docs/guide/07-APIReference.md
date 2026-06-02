@@ -35,7 +35,6 @@ lua.create_function(callback) -> LuaResult<Function>
 lua.register_async_function(name, callback) -> LuaResult<()>
 
 lua.register_type_of::<T>(name) -> LuaResult<()>
-lua.register_type::<T>(name) -> LuaResult<Table>
 lua.register_enum_of::<T>(name) -> LuaResult<()>
 ```
 
@@ -199,20 +198,6 @@ global.to_function_ref(value) -> Option<LuaFunctionRef>
 global.to_string_ref(value) -> Option<LuaStringRef>
 global.to_userdata_ref::<T>(value) -> Option<UserDataRef<T>>
 ```
-
-## TableBuilder
-
-`TableBuilder` is a fluent helper for constructing Lua tables before materializing them.
-
-```rust
-use luars::{LuaValue, TableBuilder};
-
-let builder = TableBuilder::new()
-    .set("host", LuaValue::integer(1))
-    .push(LuaValue::integer(42));
-```
-
-Build with either `GlobalState` or a compatible low-level context.
 
 ## Key Types
 

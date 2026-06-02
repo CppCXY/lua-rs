@@ -1,19 +1,20 @@
 //! High-level Lua runtime setup for the HTTP example.
 
 use luars::{
-    Function, Lua, LuaApi, LuaAsyncApi, LuaResult, LuaSandboxApi, SafeOption, SandboxConfig, Stdlib,
+    Lua, LuaApi, LuaAsyncApi, LuaFunction, LuaResult, LuaSandboxApi, SafeOption, SandboxConfig,
+    Stdlib,
 };
 
 use crate::async_io;
 
 pub struct LuaRuntime {
-    lua: Box<Lua>,
-    handler: Function,
+    lua: Lua,
+    handler: LuaFunction,
 }
 
 pub fn create_runtime(lua_script: &str) -> LuaResult<Box<LuaRuntime>> {
-    let mut lua = Box::new(Lua::new(SafeOption::default()));
-    lua.load_stdlibs(Stdlib::All)?;
+    let mut lua = Lua::new(SafeOption::default());
+    lua.open_stdlib(Stdlib::All)?;
     async_io::register_all(&mut lua)?;
 
     let mut sandbox = SandboxConfig::default();
@@ -21,7 +22,7 @@ pub fn create_runtime(lua_script: &str) -> LuaResult<Box<LuaRuntime>> {
         lua.sandbox_capture_global(&mut sandbox, name)?;
     }
 
-    let handler: Function = lua
+    let handler: LuaFunction = lua
         .load_sandboxed(lua_script, &sandbox)
         .set_name("handler.lua")
         .eval()?;
