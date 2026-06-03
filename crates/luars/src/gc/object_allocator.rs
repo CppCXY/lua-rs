@@ -3,13 +3,13 @@ use crate::lua_value::UpvalueStore;
 use crate::lua_value::{
     CClosureFunction, LuaProto, LuaUpvalue, LuaUserdata, RClosureFunction, RustCallback,
 };
-use crate::lua_vm::{CFunction, LuaState};
+use crate::lua_vm::{CFunction, CallInfo, LuaState};
 use crate::{
     LuaRawFunction, LuaRawTable, LuaResult, LuaValue,
     gc::{
         GC, GcCClosure, GcFunction, GcObjectOwner, GcProto, GcRClosure, GcString, GcTable,
-        GcThread, GcUpvalue, GcUserdata, PagedPool, ProtoPtr, StringPtr, TableAllocHandle,
-        UpvaluePtr,
+        GcThread, GcUpvalue, GcUserdata, PagedPool, Pooled, ProtoPtr, StringPtr,
+        TableAllocHandle, UpvaluePtr,
     },
 };
 
@@ -25,6 +25,7 @@ pub struct ObjectAllocator {
     upvalue_pool: PagedPool<GcUpvalue>,
     userdata_pool: PagedPool<GcUserdata>,
     proto_pool: PagedPool<GcProto>,
+    call_info_pool: PagedPool<CallInfo>,
     table_allocator: TableAllocHandle,
 }
 
@@ -46,8 +47,14 @@ impl ObjectAllocator {
             upvalue_pool: PagedPool::new(64),
             userdata_pool: PagedPool::new(16),
             proto_pool: PagedPool::new(16),
+            call_info_pool: PagedPool::new(64),
             table_allocator: TableAllocHandle::default(),
         }
+    }
+
+    #[inline(always)]
+    pub fn alloc_call_info(&mut self, value: CallInfo) -> Pooled<CallInfo> {
+        self.call_info_pool.alloc(value)
     }
 
     /// Create or intern a string (Lua-style with proper hash collision handling)
@@ -279,6 +286,7 @@ impl ObjectAllocator {
         self.upvalue_pool.release_empty_pages();
         self.userdata_pool.release_empty_pages();
         self.proto_pool.release_empty_pages();
+        self.call_info_pool.release_empty_pages();
         self.userdata_pool.release_empty_pages();
     }
 }

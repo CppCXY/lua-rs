@@ -24,7 +24,7 @@ use crate::{
     gc::{TablePtr, UpvaluePtr},
     lua_value::{BIT_ISCOLLECTABLE, LUA_VNUMINT, LuaProto},
     lua_vm::{
-        LuaError, TmKind,
+        CallInfoPtr, LuaError, TmKind,
         call_info::call_status,
         call_info::call_status::{CIST_C, CIST_CLSRET, CIST_PENDING_FINISH},
         execute::{
@@ -54,6 +54,7 @@ use crate::{
 #[derive(Clone, Copy)]
 struct FrameCtx {
     frame_idx: usize,
+    ci_ptr: CallInfoPtr,
     base: usize,
     pc: usize,
     top: usize,
@@ -65,6 +66,7 @@ struct FrameCtx {
 #[derive(Clone, Copy)]
 struct ActiveFrame {
     frame_idx: usize,
+    ci_ptr: CallInfoPtr,
     top: usize,
     call_status: u32,
 }
@@ -74,39 +76,40 @@ impl ActiveFrame {
     fn from_ctx(frame: FrameCtx) -> Self {
         Self {
             frame_idx: frame.frame_idx,
+            ci_ptr: frame.ci_ptr,
             top: frame.top,
             call_status: frame.call_status,
         }
     }
 
     #[inline(always)]
-    fn flush(&self, lua_state: &mut LuaState, pc: usize) {
-        let ci = lua_state.get_call_info_mut(self.frame_idx);
+    fn flush(&self, _lua_state: &mut LuaState, pc: usize) {
+        let ci = unsafe { self.ci_ptr.as_mut() };
         ci.top = self.top as u32;
         ci.call_status = self.call_status;
         ci.save_pc(pc);
     }
 
     #[inline(always)]
-    fn reload(&mut self, lua_state: &LuaState) {
-        let ci = lua_state.get_call_info(self.frame_idx);
+    fn reload(&mut self, _lua_state: &LuaState) {
+        let ci = unsafe { self.ci_ptr.as_ref() };
         self.top = ci.top as usize;
         self.call_status = ci.call_status;
     }
 
     #[inline(always)]
-    fn base(&self, lua_state: &LuaState) -> usize {
-        lua_state.get_call_info(self.frame_idx).base
+    fn base(&self, _lua_state: &LuaState) -> usize {
+        unsafe { self.ci_ptr.as_ref().base }
     }
 
     #[inline(always)]
-    fn current_ci<'a>(&self, lua_state: &'a LuaState) -> &'a CallInfo {
-        lua_state.get_call_info(self.frame_idx)
+    fn current_ci<'a>(&self, _lua_state: &'a LuaState) -> &'a CallInfo {
+        unsafe { self.ci_ptr.as_ref() }
     }
 
     #[inline(always)]
-    fn current_ci_mut<'a>(&self, lua_state: &'a mut LuaState) -> &'a mut CallInfo {
-        lua_state.get_call_info_mut(self.frame_idx)
+    fn current_ci_mut<'a>(&self, _lua_state: &'a mut LuaState) -> &'a mut CallInfo {
+        unsafe { self.ci_ptr.as_mut() }
     }
 
     #[inline(always)]
@@ -149,16 +152,18 @@ fn load_active_frame_header(
         }
 
         let frame_idx = current_depth - 1;
-        let call_status = lua_state.get_call_info(frame_idx).call_status;
+        let ci_ptr = lua_state.call_stack[frame_idx];
+        let call_status = unsafe { ci_ptr.as_ref().call_status };
         if call_status & (CIST_C | CIST_PENDING_FINISH) != 0
             && handle_pending_ops(lua_state, frame_idx)?
         {
             continue;
         }
 
-        let ci = lua_state.get_call_info(frame_idx);
+        let ci = unsafe { ci_ptr.as_ref() };
         return Ok(Some(FrameCtx {
             frame_idx,
+            ci_ptr,
             base: ci.base,
             pc: ci.pc as usize,
             top: ci.top as usize,
@@ -472,6 +477,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 constants = &chunk.constants;
                 upvalue_ptrs = ci.upvalue_ptrs;
                 active_frame.frame_idx = frame_idx;
+                active_frame.ci_ptr = lua_state.call_stack[frame_idx];
                 active_frame.top = ci.top as usize;
                 active_frame.call_status = ci.call_status;
                 trap = current_trap(lua_state);
@@ -493,6 +499,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 constants = &chunk.constants;
                 upvalue_ptrs = ci.upvalue_ptrs;
                 active_frame.frame_idx = frame_idx;
+                active_frame.ci_ptr = lua_state.call_stack[frame_idx];
                 active_frame.top = ci.top as usize;
                 active_frame.call_status = ci.call_status;
                 trap = current_trap(lua_state);
@@ -2309,6 +2316,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             upvalue_ptrs = new_upvalue_ptrs;
                             let new_depth = lua_state.call_depth();
                             active_frame.frame_idx = new_depth - 1;
+                            active_frame.ci_ptr = lua_state.call_stack[new_depth - 1];
                             active_frame.top = new_base + max_stack_size;
                             active_frame.call_status = call_status::with_nresults(0, nresults); // CIST_LUA = 0
                             trap = current_trap(lua_state);
