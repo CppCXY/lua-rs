@@ -384,10 +384,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             }};
         }
 
-        macro_rules! reload_ci {
-            () => {{}};
-        }
-
         // CALL HOOK: fire when entering a new Lua function (pc == 0)
         let mut trap = frame.trap;
         if pc == 0 && trap {
@@ -395,7 +391,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             if hook_mask & LUA_MASKCALL != 0 && lua_state.allow_hook {
                 flush_ci!(pc);
                 hook_on_call(lua_state, hook_mask, ci.call_status, chunk)?;
-                reload_ci!();
             }
             if hook_mask & LUA_MASKCOUNT != 0 {
                 lua_state.hook_count = lua_state.base_hook_count;
@@ -446,7 +441,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if hook_mask & LUA_MASKCALL != 0 && lua_state.allow_hook {
                         flush_ci!(0);
                         hook_on_call(lua_state, hook_mask, ci.call_status, chunk)?;
-                        reload_ci!();
                     }
                     if hook_mask & LUA_MASKCOUNT != 0 {
                         lua_state.hook_count = lua_state.base_hook_count;
@@ -497,7 +491,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             if trap {
                 flush_ci!(pc);
                 trap = hook_check_instruction(lua_state, pc, chunk)?;
-                reload_ci!();
+
                 updatebase!();
             }
 
@@ -2085,7 +2079,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 if hook_mask & LUA_MASKCALL != 0 && lua_state.allow_hook {
                                     flush_ci!(0);
                                     hook_on_call(lua_state, hook_mask, ci.call_status, chunk)?;
-                                    reload_ci!();
                                 }
                                 if hook_mask & LUA_MASKCOUNT != 0 {
                                     lua_state.hook_count = lua_state.base_hook_count;
@@ -2115,7 +2108,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         reload_after_call!();
                         continue;
                     }
-                    reload_ci!();
+
                     // C call completed
                     if lua_state.hook_mask & LUA_MASKLINE != 0 {
                         lua_state.oldpc = (pc - 1) as u32;
@@ -2141,7 +2134,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         reload_after_call!();
                         continue;
                     }
-                    reload_ci!();
+
                     // C tail call completed
                     if lua_state.hook_mask & LUA_MASKLINE != 0 {
                         lua_state.oldpc = (pc - 1) as u32;
@@ -2173,7 +2166,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             Err(e) => return Err(e),
                         }
-                        reload_ci!();
                     } else {
                         n = instr.get_b() as i32 - 1;
                         if n < 0 {
@@ -2197,7 +2189,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 }
                                 Err(e) => return Err(e),
                             }
-                            reload_ci!();
                         }
                     }
 
@@ -2353,7 +2344,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         reload_after_call!();
                         continue;
                     }
-                    reload_ci!();
+
                     if lua_state.hook_mask & LUA_MASKLINE != 0 {
                         lua_state.oldpc = (pc - 1) as u32;
                     }
@@ -2478,13 +2469,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::VarargPrep => {
                     flush_ci!(pc);
                     exec_varargprep(lua_state, chunk, &mut base)?;
-                    reload_ci!();
+
                     // After varargprep, hook call if hooks are active
                     let hook_mask = lua_state.hook_mask;
                     if hook_mask != 0 {
                         flush_ci!(pc);
                         hook_on_call(lua_state, hook_mask, ci.call_status, chunk)?;
-                        reload_ci!();
+
                         if hook_mask & LUA_MASKLINE != 0 {
                             lua_state.oldpc = u32::MAX; // force line event on next instruction
                         }
