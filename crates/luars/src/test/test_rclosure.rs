@@ -106,7 +106,9 @@ fn test_rclosure_with_upvalues() {
             |state: &mut LuaState| -> LuaResult<usize> {
                 // Get the function value from the stack (func_idx position)
                 // The upvalues are stored on the RClosureFunction, accessed via the function value
-                let frame = &state.call_stack[state.call_depth() - 1];
+                let frame = state
+                    .current_frame()
+                    .expect("rclosure callback requires frame");
                 let func_idx = frame.base - frame.func_offset as usize;
                 let func_val = state.stack_get(func_idx).unwrap();
                 let rclosure = func_val.as_rclosure().unwrap();

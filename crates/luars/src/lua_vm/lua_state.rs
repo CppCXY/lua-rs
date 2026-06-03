@@ -4,8 +4,7 @@
 
 use crate::compiler::format_source;
 use crate::gc::{
-    CreateResult, GcKind, GcObjectPtr, Pooled, ProtoPtr, StringPtr, TablePtr, ThreadPtr,
-    UpvaluePtr,
+    CreateResult, GcKind, GcObjectPtr, Pooled, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
 };
 use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
@@ -55,7 +54,7 @@ pub struct LuaState {
     /// Call stack - one CallInfo per active function call
     /// Grows dynamically on demand (like Lua 5.5's linked list approach)
     /// Similar to Lua's CallInfo *ci in lua_State
-    pub(crate) call_stack: Vec<CallInfoPtr>,
+    call_stack: Vec<CallInfoPtr>,
 
     /// Owns the stable CallInfo slots referenced by `call_stack`.
     call_stack_storage: Vec<Pooled<CallInfo>>,
@@ -227,7 +226,10 @@ impl LuaState {
 
     #[inline(always)]
     fn alloc_call_info_slot(&mut self, value: CallInfo) -> CallInfoPtr {
-        let pooled = self.global_state_mut().object_allocator.alloc_call_info(value);
+        let pooled = self
+            .global_state_mut()
+            .object_allocator
+            .alloc_call_info(value);
         let ptr = CallInfoPtr::from_mut(unsafe { &mut *pooled.as_mut_ptr() });
         self.call_stack_storage.push(pooled);
         self.call_stack.push(ptr);
@@ -1882,6 +1884,12 @@ impl LuaState {
     pub(crate) fn get_call_info(&self, idx: usize) -> &CallInfo {
         debug_assert!(idx < self.call_stack.len());
         unsafe { self.call_stack.get_unchecked(idx).as_ref() }
+    }
+
+    #[inline(always)]
+    pub(crate) fn get_call_info_ptr(&self, idx: usize) -> *mut CallInfo {
+        debug_assert!(idx < self.call_stack.len());
+        unsafe { self.call_stack.get_unchecked(idx).as_ptr() }
     }
 
     /// Get mutable CallInfo by index (unchecked — caller must ensure idx < call_depth)

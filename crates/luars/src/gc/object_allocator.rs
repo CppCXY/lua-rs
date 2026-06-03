@@ -8,8 +8,8 @@ use crate::{
     LuaRawFunction, LuaRawTable, LuaResult, LuaValue,
     gc::{
         GC, GcCClosure, GcFunction, GcObjectOwner, GcProto, GcRClosure, GcString, GcTable,
-        GcThread, GcUpvalue, GcUserdata, PagedPool, Pooled, ProtoPtr, StringPtr,
-        TableAllocHandle, UpvaluePtr,
+        GcThread, GcUpvalue, GcUserdata, PagedPool, Pooled, ProtoPtr, StringPtr, TableAllocHandle,
+        UpvaluePtr,
     },
 };
 

@@ -464,7 +464,7 @@ fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
     l.ensure_stack_capacity(result_count)?;
 
     // Cache base to avoid repeated frame lookups
-    let frame = &l.call_stack[l.call_depth() - 1];
+    let frame = l.current_frame().expect("select requires active frame");
     let base = frame.base;
     let top = frame.top as usize;
 

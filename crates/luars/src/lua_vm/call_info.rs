@@ -144,6 +144,11 @@ impl CallInfoPtr {
     }
 
     #[inline(always)]
+    pub fn as_ptr(self) -> *mut CallInfo {
+        self.0.as_ptr()
+    }
+
+    #[inline(always)]
     pub unsafe fn as_ref<'a>(self) -> &'a CallInfo {
         unsafe { self.0.as_ref() }
     }
