@@ -16,7 +16,7 @@ fn stack_api_base(state: &LuaState) -> usize {
     if state.call_depth() == 0 {
         0
     } else {
-        state.call_stack[state.call_depth() - 1].base
+        state.current_frame().map(|frame| frame.base).unwrap_or(0)
     }
 }
 

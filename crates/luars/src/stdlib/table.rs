@@ -546,7 +546,10 @@ fn table_pack(l: &mut LuaState) -> LuaResult<usize> {
 
     let mut has_collectable = false;
     // Cache stack base for direct reads
-    let frame_base = l.call_stack[l.call_depth() - 1].base;
+    let frame_base = l
+        .current_frame()
+        .expect("table.pack requires active frame")
+        .base;
 
     for i in 0..n {
         let stack_idx = frame_base + i;

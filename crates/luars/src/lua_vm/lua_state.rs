@@ -4,7 +4,7 @@
 
 use crate::compiler::format_source;
 use crate::gc::{
-    CreateResult, GcKind, GcObjectPtr, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
+    CreateResult, GcKind, GcObjectPtr, Pooled, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
 };
 use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
@@ -20,8 +20,8 @@ use crate::lua_vm::safe_option::{LuaSafeState, SafeOption};
 #[cfg(feature = "sandbox")]
 use crate::lua_vm::sandbox::{SANDBOX_TIMEOUT_CHECK_INTERVAL, SandboxConfig, SandboxRuntimeLimits};
 use crate::lua_vm::{
-    CallInfo, GlobalState, GlobalStateHandle, LuaError, LuaResult, LuaTypedAsyncCallback,
-    LuaTypedCallback, TmKind, get_metamethod_event,
+    CallInfo, CallInfoPtr, GlobalState, GlobalStateHandle, LuaError, LuaResult,
+    LuaTypedAsyncCallback, LuaTypedCallback, TmKind, get_metamethod_event,
 };
 use crate::lua_vm::{
     LUA_HOOKCALL, LUA_HOOKCOUNT, LUA_HOOKLINE, LUA_HOOKRET, LUA_HOOKTAILCALL, async_thread,
@@ -54,7 +54,10 @@ pub struct LuaState {
     /// Call stack - one CallInfo per active function call
     /// Grows dynamically on demand (like Lua 5.5's linked list approach)
     /// Similar to Lua's CallInfo *ci in lua_State
-    pub(crate) call_stack: Vec<CallInfo>,
+    call_stack: Vec<CallInfoPtr>,
+
+    /// Owns the stable CallInfo slots referenced by `call_stack`.
+    call_stack_storage: Vec<Pooled<CallInfo>>,
 
     /// Current call depth (index into call_stack)
     /// This is the actual depth, NOT call_stack.len()
@@ -163,6 +166,7 @@ impl LuaState {
             thread: ThreadPtr::null(),
             stack_top: 0, // Start with empty stack (Lua's L->top.p = L->stack)
             call_stack: Vec::with_capacity(call_stack_size),
+            call_stack_storage: Vec::with_capacity(call_stack_size),
             call_depth: 0,
             open_upvalues_list: Vec::new(),
             yield_values: Vec::new(),
@@ -208,6 +212,7 @@ impl LuaState {
         self.call_depth
             .checked_sub(1)
             .and_then(|index| self.call_stack.get(index))
+            .map(|ci| &**ci)
     }
 
     /// Get mutable current call frame
@@ -215,7 +220,27 @@ impl LuaState {
     pub fn current_frame_mut(&mut self) -> Option<&mut CallInfo> {
         self.call_depth
             .checked_sub(1)
-            .and_then(|index| self.call_stack.get_mut(index))
+            .and_then(|index| self.call_stack.get(index).copied())
+            .map(|ci| unsafe { ci.as_mut() })
+    }
+
+    #[inline(always)]
+    fn alloc_call_info_slot(&mut self, value: CallInfo) -> CallInfoPtr {
+        let pooled = self
+            .global_state_mut()
+            .object_allocator
+            .alloc_call_info(value);
+        let ptr = CallInfoPtr::from_mut(unsafe { &mut *pooled.as_mut_ptr() });
+        self.call_stack_storage.push(pooled);
+        self.call_stack.push(ptr);
+        ptr
+    }
+
+    #[inline]
+    pub(crate) fn release(&mut self) {
+        self.call_depth = 0;
+        self.call_stack.clear();
+        self.call_stack_storage.clear();
     }
 
     /// Get call stack depth
@@ -320,7 +345,7 @@ impl LuaState {
 
         // Fast path: reuse existing CallInfo slot (most common case)
         if self.call_depth < self.call_stack.len() {
-            let ci = &mut self.call_stack[self.call_depth];
+            let ci = unsafe { self.call_stack[self.call_depth].as_mut() };
             *ci = CallInfo {
                 base,
                 func_offset: 1,
@@ -333,8 +358,8 @@ impl LuaState {
                 aux_i32: -1,
             };
         } else {
-            // Slow path: allocate new CallInfo (first time reaching this depth)
-            let ci = CallInfo {
+            // Slow path: allocate new stable CallInfo slot (first time reaching this depth)
+            self.alloc_call_info_slot(CallInfo {
                 base,
                 func_offset: 1,
                 top: frame_top as u32,
@@ -344,8 +369,7 @@ impl LuaState {
                 chunk_ptr: chunk_raw,
                 upvalue_ptrs: upvalue_raw,
                 aux_i32: -1,
-            };
-            self.call_stack.push(ci);
+            });
         }
 
         self.call_depth += 1;
@@ -385,7 +409,7 @@ impl LuaState {
             return Ok(false);
         }
 
-        let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
+        let ci = unsafe { self.call_stack.get_unchecked(self.call_depth).as_mut() };
         *ci = CallInfo {
             base,
             func_offset: 1,
@@ -433,7 +457,7 @@ impl LuaState {
             && frame_top + EXTRA_STACK <= self.stack.len()
             && self.call_depth < self.call_stack.len()
         {
-            let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
+            let ci = unsafe { self.call_stack.get_unchecked(self.call_depth).as_mut() };
             *ci = CallInfo {
                 base,
                 func_offset: 1,
@@ -527,7 +551,7 @@ impl LuaState {
 
         // Reuse existing CallInfo slot or allocate new one
         if self.call_depth < self.call_stack.len() {
-            let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
+            let ci = unsafe { self.call_stack.get_unchecked(self.call_depth).as_mut() };
             *ci = CallInfo {
                 base,
                 func_offset: 1,
@@ -540,7 +564,7 @@ impl LuaState {
                 aux_i32: -1,
             };
         } else {
-            self.call_stack.push(CallInfo {
+            self.alloc_call_info_slot(CallInfo {
                 base,
                 func_offset: 1,
                 top: frame_top as u32,
@@ -591,7 +615,7 @@ impl LuaState {
 
         // Reuse existing CallInfo slot or allocate
         if self.call_depth < self.call_stack.len() {
-            let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
+            let ci = unsafe { self.call_stack.get_unchecked(self.call_depth).as_mut() };
             *ci = CallInfo {
                 base,
                 chunk_ptr: std::ptr::null(),
@@ -604,7 +628,7 @@ impl LuaState {
                 aux_i32: -1,
             };
         } else {
-            self.call_stack.push(CallInfo {
+            self.alloc_call_info_slot(CallInfo {
                 base,
                 chunk_ptr: std::ptr::null(),
                 upvalue_ptrs: std::ptr::null(),
@@ -1616,7 +1640,7 @@ impl LuaState {
     pub fn get_frame(&self, frame_idx: usize) -> Option<&CallInfo> {
         // Only return frame if it's within current call_depth (valid frames)
         if frame_idx < self.call_depth {
-            self.call_stack.get(frame_idx)
+            self.call_stack.get(frame_idx).map(|ci| &**ci)
         } else {
             None
         }
@@ -1859,14 +1883,20 @@ impl LuaState {
     #[inline(always)]
     pub(crate) fn get_call_info(&self, idx: usize) -> &CallInfo {
         debug_assert!(idx < self.call_stack.len());
-        unsafe { self.call_stack.get_unchecked(idx) }
+        unsafe { self.call_stack.get_unchecked(idx).as_ref() }
+    }
+
+    #[inline(always)]
+    pub(crate) fn get_call_info_ptr(&self, idx: usize) -> *mut CallInfo {
+        debug_assert!(idx < self.call_stack.len());
+        unsafe { self.call_stack.get_unchecked(idx).as_ptr() }
     }
 
     /// Get mutable CallInfo by index (unchecked — caller must ensure idx < call_depth)
     #[inline(always)]
     pub(crate) fn get_call_info_mut(&mut self, idx: usize) -> &mut CallInfo {
         debug_assert!(idx < self.call_stack.len());
-        unsafe { self.call_stack.get_unchecked_mut(idx) }
+        unsafe { self.call_stack.get_unchecked(idx).as_mut() }
     }
 
     /// Pop the current call frame (Lua callers only — does NOT adjust VM n_ccalls)

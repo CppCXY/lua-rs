@@ -7,8 +7,11 @@ use crate::{
     lua_value::{lua_value_to_udvalue, udvalue_to_lua_value, udvalue_to_lua_value_with_token},
     lua_vm::{
         LuaError, LuaState, TmKind,
-        call_info::call_status::{
-            CIST_C, CIST_PENDING_FINISH, CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL,
+        call_info::{
+            CallInfo,
+            call_status::{
+                CIST_C, CIST_PENDING_FINISH, CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL,
+            },
         },
         execute::{
             call::poscall,
@@ -766,8 +769,7 @@ pub fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaVa
 /// This is the Rust equivalent of Lua 5.5's finishCcall.
 #[cold]
 #[inline(never)]
-fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
-    let ci = lua_state.get_call_info(frame_idx);
+fn finish_c_frame(lua_state: &mut LuaState, ci: &CallInfo) -> LuaResult<()> {
     let pcall_func_pos = ci.base - ci.func_offset as usize;
     let nresults = ci.nresults();
     let call_status = ci.call_status;
@@ -966,8 +968,7 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
 }
 
 #[inline(always)]
-fn mark_pending_finish(lua_state: &mut LuaState, frame_idx: usize, aux: i32) {
-    let ci = lua_state.get_call_info_mut(frame_idx);
+fn mark_pending_finish(ci: &mut CallInfo, aux: i32) {
     ci.set_pending_finish_get(aux);
     ci.call_status |= CIST_PENDING_FINISH;
 }
@@ -977,15 +978,14 @@ fn mark_pending_finish(lua_state: &mut LuaState, frame_idx: usize, aux: i32) {
 /// This is the equivalent of C Lua's luaV_finishOp.
 #[cold]
 #[inline(never)]
-pub fn handle_pending_ops(lua_state: &mut LuaState, ci_idx: usize) -> LuaResult<bool> {
-    if lua_state.get_call_info(ci_idx).call_status & CIST_C != 0 {
-        finish_c_frame(lua_state, ci_idx)?;
+pub fn handle_pending_ops(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaResult<bool> {
+    if ci.call_status & CIST_C != 0 {
+        finish_c_frame(lua_state, ci)?;
         return Ok(true); // restart startfunc
     }
     // === luaV_finishOp equivalent ===
     // Extract needed CI fields upfront, then drop the borrow.
     let (saved_pc, base_tmp, pending_finish, _nresults, ci_chunk_ptr, ci_top) = {
-        let ci = lua_state.get_call_info_mut(ci_idx);
         (
             ci.pc as usize,
             ci.base,
@@ -1061,7 +1061,7 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, ci_idx: usize) -> LuaResult<
                         let k = interrupted_instr.get_k();
                         if res != k {
                             // Skip the JMP instruction
-                            lua_state.get_call_info_mut(ci_idx).pc += 1;
+                            ci.pc += 1;
                         }
                     }
                 }
@@ -1096,16 +1096,14 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, ci_idx: usize) -> LuaResult<
         lua_state.set_top_raw(ci_top);
     }
 
-    lua_state
-        .get_call_info_mut(ci_idx)
-        .set_pending_finish_get(-1);
-    lua_state.get_call_info_mut(ci_idx).call_status &= !CIST_PENDING_FINISH;
+    ci.set_pending_finish_get(-1);
+    ci.call_status &= !CIST_PENDING_FINISH;
     Ok(false) // continue to hot path
 }
 
 pub fn objlen(
     l: &mut LuaState,
-    frame_idx: usize,
+    ci: &mut CallInfo,
     result_reg: usize,
     value: LuaValue,
 ) -> LuaResult<()> {
@@ -1121,7 +1119,7 @@ pub fn objlen(
             return match call_tm_res_into(l, tm, value, value, result_reg) {
                 Ok(()) => Ok(()),
                 Err(LuaError::Yield) => {
-                    mark_pending_finish(l, frame_idx, result_reg as i32);
+                    mark_pending_finish(ci, result_reg as i32);
                     Err(LuaError::Yield)
                 }
                 Err(e) => Err(e),
@@ -1156,7 +1154,7 @@ pub fn objlen(
         match call_tm_res_into(l, tm, value, value, result_reg) {
             Ok(()) => {}
             Err(LuaError::Yield) => {
-                mark_pending_finish(l, frame_idx, result_reg as i32);
+                mark_pending_finish(ci, result_reg as i32);
                 return Err(LuaError::Yield);
             }
             Err(e) => return Err(e),
@@ -1423,7 +1421,7 @@ pub fn error_global(lua_state: &mut LuaState, global_name: &str) -> LuaError {
 #[inline(never)]
 pub fn order_tm_fallback(
     lua_state: &mut LuaState,
-    frame_idx: usize,
+    ci: &mut CallInfo,
     va: LuaValue,
     vb: LuaValue,
     tm: TmKind,
@@ -1433,7 +1431,7 @@ pub fn order_tm_fallback(
         Ok(Some(result)) => Ok(result),
         Ok(None) => Err(ordererror(lua_state, &va, &vb)),
         Err(LuaError::Yield) => {
-            mark_pending_finish(lua_state, frame_idx, -1);
+            mark_pending_finish(ci, -1);
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1446,7 +1444,7 @@ pub fn order_tm_fallback(
 #[allow(clippy::too_many_arguments)]
 pub fn bin_tm_fallback(
     lua_state: &mut LuaState,
-    frame_idx: usize,
+    ci: &mut CallInfo,
     ra: LuaValue,
     rb: LuaValue,
     result_reg: u32,
@@ -1458,7 +1456,7 @@ pub fn bin_tm_fallback(
     match try_bin_tm(lua_state, ra, rb, result_reg, a_reg, b_reg, tm) {
         Ok(_) => Ok(()),
         Err(LuaError::Yield) => {
-            mark_pending_finish(lua_state, frame_idx, result_reg as i32);
+            mark_pending_finish(ci, result_reg as i32);
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1470,7 +1468,7 @@ pub fn bin_tm_fallback(
 #[inline(never)]
 pub fn unary_tm_fallback(
     lua_state: &mut LuaState,
-    frame_idx: usize,
+    ci: &mut CallInfo,
     rb: LuaValue,
     result_reg: usize,
     tm: TmKind,
@@ -1479,7 +1477,7 @@ pub fn unary_tm_fallback(
     match try_unary_tm(lua_state, rb, result_reg, tm) {
         Ok(_) => Ok(()),
         Err(LuaError::Yield) => {
-            mark_pending_finish(lua_state, frame_idx, result_reg as i32);
+            mark_pending_finish(ci, result_reg as i32);
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1492,7 +1490,7 @@ pub fn unary_tm_fallback(
 #[inline(never)]
 pub fn finishget_fallback(
     lua_state: &mut LuaState,
-    frame_idx: usize,
+    ci: &mut CallInfo,
     obj: &LuaValue,
     key: &LuaValue,
     dest_reg: usize,
@@ -1500,7 +1498,7 @@ pub fn finishget_fallback(
     match finishget_to_reg_known_miss(lua_state, obj, key, dest_reg) {
         Ok(()) => Ok(()),
         Err(LuaError::Yield) => {
-            mark_pending_finish(lua_state, frame_idx, dest_reg as i32);
+            mark_pending_finish(ci, dest_reg as i32);
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1667,7 +1665,7 @@ fn finishget_to_reg_known_miss(
 #[inline(never)]
 pub fn finishset_fallback(
     lua_state: &mut LuaState,
-    frame_idx: usize,
+    ci: &mut CallInfo,
     obj: &LuaValue,
     key: &LuaValue,
     value: LuaValue,
@@ -1676,7 +1674,7 @@ pub fn finishset_fallback(
     match finishset(lua_state, obj, key, value, known_miss) {
         Ok(_) => Ok(()),
         Err(LuaError::Yield) => {
-            mark_pending_finish(lua_state, frame_idx, -2);
+            mark_pending_finish(ci, -2);
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1687,14 +1685,14 @@ pub fn finishset_fallback(
 #[inline(never)]
 pub fn eq_fallback(
     lua_state: &mut LuaState,
-    frame_idx: usize,
+    ci: &mut CallInfo,
     ra: LuaValue,
     rb: LuaValue,
 ) -> LuaResult<bool> {
     match equalobj(lua_state, ra, rb) {
         Ok(eq) => Ok(eq),
         Err(LuaError::Yield) => {
-            mark_pending_finish(lua_state, frame_idx, -1);
+            mark_pending_finish(ci, -1);
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),

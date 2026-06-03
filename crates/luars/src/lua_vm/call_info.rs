@@ -3,6 +3,8 @@
 
 use crate::gc::UpvaluePtr;
 use crate::lua_value::LuaProto;
+use std::ops::{Deref, DerefMut};
+use std::ptr::NonNull;
 
 /// Call status flags (equivalent to Lua's CIST_* flags)
 pub mod call_status {
@@ -130,6 +132,47 @@ pub struct CallInfo {
     /// - When CIST_CLSRET is set: saved nres for return continuation.
     /// - When CIST_PENDING_FINISH is set: pending finish destination/state.
     pub aux_i32: i32,
+}
+
+#[derive(Clone, Copy)]
+pub struct CallInfoPtr(NonNull<CallInfo>);
+
+impl CallInfoPtr {
+    #[inline(always)]
+    pub fn from_mut(value: &mut CallInfo) -> Self {
+        Self(NonNull::from(value))
+    }
+
+    #[inline(always)]
+    pub fn as_ptr(self) -> *mut CallInfo {
+        self.0.as_ptr()
+    }
+
+    #[inline(always)]
+    pub unsafe fn as_ref<'a>(self) -> &'a CallInfo {
+        unsafe { self.0.as_ref() }
+    }
+
+    #[inline(always)]
+    pub unsafe fn as_mut<'a>(self) -> &'a mut CallInfo {
+        unsafe { &mut *self.0.as_ptr() }
+    }
+}
+
+impl Deref for CallInfoPtr {
+    type Target = CallInfo;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl DerefMut for CallInfoPtr {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.0.as_ptr() }
+    }
 }
 
 impl CallInfo {

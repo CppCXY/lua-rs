@@ -32,7 +32,7 @@ use crate::lua_value::lua_convert::{FromLua, IntoLua};
 use crate::lua_value::{
     LuaProto, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore,
 };
-pub use crate::lua_vm::call_info::CallInfo;
+pub use crate::lua_vm::call_info::{CallInfo, CallInfoPtr};
 use crate::lua_vm::const_string::ConstString;
 pub use crate::lua_vm::debug_info::DebugInfo;
 pub(crate) use crate::lua_vm::error_msg::ErrorMsg;

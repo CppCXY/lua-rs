@@ -396,7 +396,16 @@ impl GC {
         l.remove_dead_string(str_ptr);
     }
 
+    #[inline]
+    fn prepare_object_for_release(obj: &mut GcObjectOwner) {
+        if let Some(thread) = obj.as_thread_mut() {
+            thread.release();
+        }
+    }
+
     fn release_or_detach_object(obj: GcObjectOwner) {
+        let mut obj = obj;
+        Self::prepare_object_for_release(&mut obj);
         if obj.header().is_shared() {
             std::mem::forget(obj);
         } else {
@@ -626,7 +635,8 @@ impl GC {
 
     /// Release a GC object by dropping it.
     #[inline]
-    fn release_object(&mut self, obj: GcObjectOwner) {
+    fn release_object(mut obj: GcObjectOwner) {
+        Self::prepare_object_for_release(&mut obj);
         drop(obj);
     }
 
@@ -2503,7 +2513,7 @@ impl GC {
 
                                 let obj = self.allgc.remove(gc_ptr);
                                 self.total_bytes -= obj.size() as isize;
-                                drop(obj);
+                                Self::release_object(obj);
                             }
                         } else {
                             // 存活对象：重置为当前白色 + G_NEW
@@ -2548,7 +2558,7 @@ impl GC {
 
                                 let obj = self.survival.remove(gc_ptr);
                                 self.total_bytes -= obj.size() as isize;
-                                drop(obj);
+                                Self::release_object(obj);
                             }
                         } else {
                             // 存活对象：重置为当前白色 + G_NEW，移回 allgc
@@ -2593,7 +2603,7 @@ impl GC {
 
                                 let obj = self.old.remove(gc_ptr);
                                 self.total_bytes -= obj.size() as isize;
-                                drop(obj);
+                                Self::release_object(obj);
                             }
                         } else {
                             // 存活对象：重置为当前白色 + G_NEW，移回 allgc
@@ -2692,7 +2702,7 @@ impl GC {
                     Self::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
                 }
                 self.total_bytes -= gc_owner.size() as isize;
-                self.release_object(gc_owner);
+                Self::release_object(gc_owner);
                 continue;
             }
 
@@ -2912,7 +2922,7 @@ impl GC {
                         GC::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
                     }
                     *total_bytes -= gc_owner.size() as isize;
-                    drop(gc_owner);
+                    Self::release_object(gc_owner);
                 }
             } else {
                 gc_owner.header_mut().set_age(G_OLD);
@@ -3576,7 +3586,7 @@ impl GC {
                     #[cfg(debug_assertions)]
                     Self::validate_not_on_stack(&gc_owner, &stack_ptrs, &self.old);
                     self.total_bytes -= gc_owner.size() as isize;
-                    self.release_object(gc_owner);
+                    Self::release_object(gc_owner);
                 }
             } else {
                 // BUG FIX: Match C Lua 5.5's sweepgen age-dependent logic.
@@ -3640,7 +3650,7 @@ impl GC {
                     #[cfg(debug_assertions)]
                     Self::validate_not_on_stack(&gc_owner, &stack_ptrs, &self.old);
                     self.total_bytes -= gc_owner.size() as isize;
-                    self.release_object(gc_owner);
+                    Self::release_object(gc_owner);
                 }
             } else {
                 let size = gc_owner.size() as isize;
