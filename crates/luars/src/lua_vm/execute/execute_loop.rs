@@ -784,6 +784,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a();
                     let b = instr.get_b();
                     let c = instr.get_c();
+                    // why use pointer here?
+                    // because we have tryed to use stack_copy for table access in the past, 
+                    // but is too slow, and we want to avoid unnecessary copying of table values.
                     let ra_ptr = stack_ptr(lua_state.stack(), stack_id!(a));
                     let rb_ptr = stack_ptr(lua_state.stack(), stack_id!(b));
 
