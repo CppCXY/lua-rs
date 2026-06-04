@@ -7,8 +7,6 @@ mod hook;
 pub(crate) mod metamethod;
 mod number;
 mod vararg;
-#[macro_use]
-mod arith;
 
 pub use execute_loop::lua_execute;
 pub use helper::{get_metamethod_event, get_metatable};
