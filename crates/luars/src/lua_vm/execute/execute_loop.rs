@@ -349,6 +349,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         macro_rules! updatetrap {
             () => {
+                // Always reload base_stk — the stack may have been reallocated
+                // by a metamethod call or other operation since our last reload.
+                base_stk = ci.base_stk;
+
                 #[cfg(not(feature = "sandbox"))]
                 {
                     trap = lua_state.hook_mask != 0;
@@ -358,12 +362,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 {
                     trap = lua_state.has_active_instruction_watch();
                 }
-            };
-        }
-
-        macro_rules! updatebase {
-            () => {
-                base_stk = ci.base_stk;
             };
         }
 
@@ -383,7 +381,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 ci.save_pc(pc);
                 trap = hook_check_instruction(lua_state, pc, chunk)?;
 
-                updatebase!();
+                base_stk = ci.base_stk;
             }
 
             match instr.get_opcode() {
@@ -509,14 +507,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 if let Some(outer) = table.impl_table.get_shortstr_fast(key) {
                                     if outer.is_table() {
                                         let inner_table = outer.hvalue();
-                                        if inner_table.impl_table.has_hash() {
-                                            if inner_table
+                                        if inner_table.impl_table.has_hash()
+                                            && inner_table
                                                 .impl_table
                                                 .get_shortstr_into(next_key, dest.as_ptr())
-                                            {
-                                                pc += 1;
-                                                continue;
-                                            }
+                                        {
+                                            pc += 1;
+                                            continue;
                                         }
                                     }
 
@@ -526,10 +523,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                         }
 
-                        if table.impl_table.has_hash() {
-                            if table.impl_table.get_shortstr_into(key, dest.as_ptr()) {
-                                continue;
-                            }
+                        if table.impl_table.has_hash()
+                            && table.impl_table.get_shortstr_into(key, dest.as_ptr())
+                        {
+                            continue;
                         }
                     }
                     savestate!();
@@ -1193,6 +1190,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             key,
                             base_stk.offset(a as usize),
                         ) {
+                            updatetrap!();
                             continue;
                         }
                     }
@@ -1514,6 +1512,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let rb = base_stk.offset(b as usize).get();
                     savestate!();
                     objlen(lua_state, ci, base_stk.offset(a as usize), rb)?;
+                    updatetrap!();
                 }
                 OpCode::Concat => {
                     let a = instr.get_a();
@@ -1561,7 +1560,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     ci.save_pc(pc);
                     match lua_state.close_all(close_from) {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            updatetrap!();
+                        }
                         Err(LuaError::Yield) => {
                             ci.pc -= 1;
                             return Err(LuaError::Yield);
@@ -2028,7 +2029,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         // Continue closing remaining TBC variables (if any)
                         match lua_state.close_all(ci.base) {
-                            Ok(()) => {}
+                            Ok(()) => {
+                                #[cfg(not(feature = "sandbox"))]
+                                {
+                                    trap = lua_state.hook_mask != 0;
+                                }
+
+                                #[cfg(feature = "sandbox")]
+                                {
+                                    trap = lua_state.has_active_instruction_watch();
+                                }
+                            }
                             Err(LuaError::Yield) => {
                                 ci.call_status |= CIST_CLSRET;
                                 ci.save_pc(pc - 1);
@@ -2051,7 +2062,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 lua_state.set_top_raw(ci_top);
                             }
                             match lua_state.close_all(ci.base) {
-                                Ok(()) => {}
+                                Ok(()) => {
+                                    #[cfg(not(feature = "sandbox"))]
+                                    {
+                                        trap = lua_state.hook_mask != 0;
+                                    }
+
+                                    #[cfg(feature = "sandbox")]
+                                    {
+                                        trap = lua_state.has_active_instruction_watch();
+                                    }
+                                }
                                 Err(LuaError::Yield) => {
                                     ci.call_status |= CIST_CLSRET;
                                     ci.save_pc(pc - 1);
@@ -2179,6 +2200,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         // Skip the loop body: jump forward past FORLOOP
                         pc += instr.get_bx() as usize + 1;
                     }
+                    updatetrap!();
                 }
                 OpCode::TForPrep => {
                     // Prepare generic for loop — inline (for loop related)

@@ -811,7 +811,7 @@ impl LuaState {
     }
 
     pub(crate) fn offset_of_stk_id(&self, stk_id: StkId) -> i32 {
-        let sp = self.stack.as_ptr() as *const LuaValue;
+        let sp = self.stack.as_ptr();
         let offset = (stk_id.as_ptr() as usize).wrapping_sub(sp as usize);
         (offset / std::mem::size_of::<LuaValue>()) as i32
     }
