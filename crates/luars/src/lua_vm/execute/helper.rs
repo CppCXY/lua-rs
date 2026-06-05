@@ -1,4 +1,4 @@
-use crate::lua_value::{LUA_VFALSE, LUA_VNIL, LUA_VNUMFLT, LUA_VNUMINT, LUA_VTRUE, LuaInnerValue};
+use crate::lua_value::{LUA_VNIL, LUA_VNUMFLT, LUA_VNUMINT, LuaInnerValue};
 use crate::stdlib::basic::parse_number::parse_lua_number;
 use crate::stdlib::debug::{objtypename, ordererror, typeerror};
 use crate::{
@@ -6,7 +6,7 @@ use crate::{
     gc::TablePtr,
     lua_value::{lua_value_to_udvalue, udvalue_to_lua_value, udvalue_to_lua_value_with_token},
     lua_vm::{
-        LuaError, LuaState, TmKind,
+        LuaError, LuaState, StkId, TmKind,
         call_info::{
             CallInfo,
             call_status::{
@@ -67,10 +67,12 @@ pub fn buildhiddenargs(
     }
 
     {
+        let sp = lua_state.stack_mut().as_mut_ptr();
         let ci = lua_state
             .current_frame_mut()
             .expect("stack frame update requires an active call frame");
         ci.base = new_base;
+        ci.base_stk = StkId::from_stack(sp, new_base);
         ci.top = (new_base + chunk.max_stack_size) as u32;
         ci.func_offset = (new_base - func_pos) as u32; // Distance from new_base to original func
     }
@@ -149,16 +151,6 @@ pub fn chgfltvalue(v: &mut LuaValue, n: f64) {
     v.value.n = n;
 }
 
-/// setivalue - 设置整数值
-/// OPTIMIZATION: Direct field access matching Lua 5.5's setivalue macro
-#[inline(always)]
-pub unsafe fn psetivalue(v: *mut LuaValue, i: i64) {
-    unsafe {
-        (*v).tt = LUA_VNUMINT;
-        (*v).value.i = i;
-    }
-}
-
 /// setivalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn setivalue(v: &mut LuaValue, i: i64) {
@@ -191,37 +183,11 @@ pub fn luai_numpow(a: f64, b: f64) -> f64 {
     }
 }
 
-/// setfltvalue - 设置浮点值  
-/// OPTIMIZATION: Direct field access matching Lua 5.5's setfltvalue macro
-#[inline(always)]
-pub unsafe fn psetfltvalue(v: *mut LuaValue, n: f64) {
-    unsafe {
-        (*v).tt = LUA_VNUMFLT; // Lua 5.5's LUA_TNUMFLT is one more than LUA_VNUMINT
-        (*v).value.n = n;
-    }
-}
-
 /// setfltvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn setfltvalue(v: &mut LuaValue, n: f64) {
     v.tt = LUA_VNUMFLT; // Lua 5.5's LUA_TNUMFLT is one more than LUA_VNUMINT
     v.value.n = n;
-}
-
-/// setbfvalue_ref - 引用版本（保留兼容性）
-#[inline(always)]
-pub fn setbfvalue(v: &mut LuaValue) {
-    // *v = LuaValue::boolean(false);
-    v.tt = LUA_VFALSE;
-    v.value = LuaInnerValue::NIL;
-}
-
-/// setbtvalue_ref - 引用版本（保留兼容性）
-#[inline(always)]
-pub fn setbtvalue(v: &mut LuaValue) {
-    // *v = LuaValue::boolean(true);
-    v.tt = LUA_VTRUE;
-    v.value = LuaInnerValue::NIL;
 }
 
 /// setnilvalue_ref - 引用版本（保留兼容性）
@@ -237,14 +203,6 @@ pub fn setobjs2s(l: &mut LuaState, a: usize, b: usize) {
     let stack = l.stack_mut();
     unsafe {
         *stack.get_unchecked_mut(a) = *stack.get_unchecked(b);
-    }
-}
-
-#[inline(always)]
-pub fn setobj2s(l: &mut LuaState, a: usize, b: &LuaValue) {
-    let stack = l.stack_mut();
-    unsafe {
-        *stack.get_unchecked_mut(a) = *b;
     }
 }
 
@@ -1104,33 +1062,28 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaRes
 pub fn objlen(
     l: &mut LuaState,
     ci: &mut CallInfo,
-    result_reg: usize,
+    dest_stk_id: StkId,
     value: LuaValue,
 ) -> LuaResult<()> {
     if let Some(bytes) = value.as_bytes() {
         let len = bytes.len();
-        setivalue(
-            unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
-            len as i64,
-        );
+        dest_stk_id.set_integer(len as i64);
         return Ok(());
     } else if value.ttistable() {
         if let Some(tm) = get_metamethod_event(l, &value, TmKind::Len) {
-            return match call_tm_res_into(l, tm, value, value, result_reg) {
+            return match call_tm_res_into(l, tm, value, value, dest_stk_id) {
                 Ok(()) => Ok(()),
                 Err(LuaError::Yield) => {
-                    mark_pending_finish(ci, result_reg as i32);
+                    let aux = l.offset_of_stk_id(dest_stk_id);
+                    mark_pending_finish(ci, aux);
                     Err(LuaError::Yield)
                 }
                 Err(e) => Err(e),
             };
         }
 
-        let len = value.as_table().unwrap().len();
-        setivalue(
-            unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
-            len as i64,
-        );
+        let len = value.hvalue().len();
+        dest_stk_id.set_integer(len as i64);
         return Ok(());
     } else {
         // Try trait-based __len for userdata first
@@ -1140,10 +1093,7 @@ pub fn objlen(
             let trait_obj = ud.get_trait()?;
             if let Some(udv) = trait_obj.lua_len() {
                 let result = udvalue_to_lua_value(l, udv)?;
-                setivalue(
-                    unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
-                    result.as_integer().unwrap_or(0),
-                );
+                dest_stk_id.set_integer(result.as_integer().unwrap_or(0));
                 return Ok(());
             }
         }
@@ -1151,10 +1101,11 @@ pub fn objlen(
 
     let tm = get_metamethod_event(l, &value, TmKind::Len);
     if let Some(tm) = tm {
-        match call_tm_res_into(l, tm, value, value, result_reg) {
+        match call_tm_res_into(l, tm, value, value, dest_stk_id) {
             Ok(()) => {}
             Err(LuaError::Yield) => {
-                mark_pending_finish(ci, result_reg as i32);
+                let aux = l.offset_of_stk_id(dest_stk_id);
+                mark_pending_finish(ci, aux);
                 return Err(LuaError::Yield);
             }
             Err(e) => return Err(e),
@@ -1493,12 +1444,13 @@ pub fn finishget_fallback(
     ci: &mut CallInfo,
     obj: &LuaValue,
     key: &LuaValue,
-    dest_reg: usize,
+    dest_stk_id: StkId,
 ) -> LuaResult<()> {
-    match finishget_to_reg_known_miss(lua_state, obj, key, dest_reg) {
+    match finishget_to_reg_known_miss(lua_state, obj, key, dest_stk_id) {
         Ok(()) => Ok(()),
         Err(LuaError::Yield) => {
-            mark_pending_finish(ci, dest_reg as i32);
+            let aux = lua_state.offset_of_stk_id(dest_stk_id);
+            mark_pending_finish(ci, aux);
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1507,13 +1459,13 @@ pub fn finishget_fallback(
 
 /// Fast path for OOP-style `SELF_` lookups where the miss is resolved by a
 /// table-only `__index` chain and the key is a short string.
-/// Returns true if a value was found and written directly to `dest_reg`.
+/// Returns true if a value was found and written directly to `dest_stk_id`.
 #[inline(never)]
 pub fn self_shortstr_index_chain_fast(
     lua_state: &mut LuaState,
     obj: &LuaValue,
     key: &LuaValue,
-    dest_reg: usize,
+    dest_stk_id: StkId,
 ) -> bool {
     const TM_INDEX_BIT: u8 = TmKind::Index as u8;
 
@@ -1531,7 +1483,7 @@ pub fn self_shortstr_index_chain_fast(
         };
 
         if let Some(value) = table.impl_table.get_shortstr_fast(key) {
-            setobj2s(lua_state, dest_reg, &value);
+            dest_stk_id.write(&value);
             return true;
         }
 
@@ -1564,7 +1516,7 @@ fn finishget_to_reg_inner(
     lua_state: &mut LuaState,
     obj: &LuaValue,
     key: &LuaValue,
-    dest_reg: usize,
+    dest_stk_id: StkId,
     skip_first_raw_lookup: bool,
 ) -> LuaResult<()> {
     const TM_INDEX_BIT: u8 = TmKind::Index as u8;
@@ -1576,7 +1528,7 @@ fn finishget_to_reg_inner(
         let tm = if let Some(table) = t.as_table_mut() {
             if !skip_raw_lookup {
                 if let Some(val) = table.raw_get(key) {
-                    setobj2s(lua_state, dest_reg, &val);
+                    dest_stk_id.write(&val);
                     return Ok(());
                 }
             } else {
@@ -1585,12 +1537,12 @@ fn finishget_to_reg_inner(
 
             let meta = table.meta_ptr();
             if meta.is_null() {
-                setobj2s(lua_state, dest_reg, &LuaValue::nil());
+                dest_stk_id.set_nil();
                 return Ok(());
             }
             let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
             if mt.no_tm(TM_INDEX_BIT) {
-                setobj2s(lua_state, dest_reg, &LuaValue::nil());
+                dest_stk_id.set_nil();
                 return Ok(());
             }
             let vm = lua_state.global_state_mut();
@@ -1599,7 +1551,7 @@ fn finishget_to_reg_inner(
                 Some(v) => v,
                 None => {
                     mt.set_tm_absent(TM_INDEX_BIT);
-                    setobj2s(lua_state, dest_reg, &LuaValue::nil());
+                    dest_stk_id.set_nil();
                     return Ok(());
                 }
             }
@@ -1613,7 +1565,7 @@ fn finishget_to_reg_inner(
                     && let Some(udv) = trait_obj.get_field(key_str)
                 {
                     let result = udvalue_to_lua_value_with_token(lua_state, udv, token)?;
-                    setobj2s(lua_state, dest_reg, &result);
+                    dest_stk_id.write(&result);
                     return Ok(());
                 }
             }
@@ -1627,7 +1579,7 @@ fn finishget_to_reg_inner(
         };
 
         if tm.is_function() {
-            return call_tm_res_into(lua_state, tm, t, *key, dest_reg);
+            return call_tm_res_into(lua_state, tm, t, *key, dest_stk_id);
         }
 
         t = tm;
@@ -1640,7 +1592,7 @@ fn finishget_to_reg_inner(
                 table.raw_get(key)
             };
             if let Some(value) = value {
-                setobj2s(lua_state, dest_reg, &value);
+                dest_stk_id.write(&value);
                 return Ok(());
             }
             skip_raw_lookup = true;
@@ -1654,9 +1606,9 @@ fn finishget_to_reg_known_miss(
     lua_state: &mut LuaState,
     obj: &LuaValue,
     key: &LuaValue,
-    dest_reg: usize,
+    dest_stk_id: StkId,
 ) -> LuaResult<()> {
-    finishget_to_reg_inner(lua_state, obj, key, dest_reg, true)
+    finishget_to_reg_inner(lua_state, obj, key, dest_stk_id, true)
 }
 
 /// finishset wrapper for SetTabUp/SetTable/SetI/SetField
@@ -1771,41 +1723,10 @@ pub fn const_ref<I: VmIndex>(constants: &[LuaValue], index: I) -> &LuaValue {
 }
 
 #[inline(always)]
-pub fn stack_ref(stack: &[LuaValue], index: usize) -> &LuaValue {
-    unsafe { stack.get_unchecked(index) }
-}
-
-#[inline(always)]
-pub fn stack_mut_ref(stack: &mut [LuaValue], index: usize) -> &mut LuaValue {
-    unsafe { stack.get_unchecked_mut(index) }
-}
-
-#[inline(always)]
-pub fn stack_copy(stack: &[LuaValue], index: usize) -> LuaValue {
-    *stack_ref(stack, index)
-}
-
-#[inline(always)]
-pub fn stack_ptr(stack: &[LuaValue], index: usize) -> *const LuaValue {
-    unsafe { stack.as_ptr().add(index) }
-}
-
-#[inline(always)]
-pub fn stack_mut_ptr(stack: &mut [LuaValue], index: usize) -> *mut LuaValue {
-    unsafe { stack.as_mut_ptr().add(index) }
-}
-
-#[inline(always)]
-pub fn stack_val<I: VmIndex>(stack: &[LuaValue], base: usize, reg: I) -> &LuaValue {
-    stack_ref(stack, base + reg.to_usize())
-}
-
-#[inline(always)]
-pub fn stack_val_mut<I: VmIndex>(stack: &mut [LuaValue], base: usize, reg: I) -> &mut LuaValue {
-    stack_mut_ref(stack, base + reg.to_usize())
-}
-
-#[inline(always)]
 pub fn k_val<I: VmIndex>(constants: &[LuaValue], index: I) -> &LuaValue {
     const_ref(constants, index)
+}
+
+pub fn pk_val(constants: &[LuaValue], index: usize) -> StkId {
+    StkId::from_const_ptr(const_ref(constants, index) as *const LuaValue)
 }

@@ -7,7 +7,7 @@ use crate::gc::{
     CreateResult, GcKind, GcObjectPtr, Pooled, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
 };
 use crate::lua_value::userdata_trait::UserDataTrait;
-use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
+use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, UpvalueStore};
 use crate::lua_vm::async_thread::AsyncFuture;
 use crate::lua_vm::call_info::call_status::{
     self, CIST_C, CIST_HOOKED, CIST_RECST, CIST_XPCALL, CIST_YPCALL,
@@ -21,7 +21,7 @@ use crate::lua_vm::safe_option::{LuaSafeState, SafeOption};
 use crate::lua_vm::sandbox::{SANDBOX_TIMEOUT_CHECK_INTERVAL, SandboxConfig, SandboxRuntimeLimits};
 use crate::lua_vm::{
     CallInfo, CallInfoPtr, GlobalState, GlobalStateHandle, LuaError, LuaResult,
-    LuaTypedAsyncCallback, LuaTypedCallback, TmKind, get_metamethod_event,
+    LuaTypedAsyncCallback, LuaTypedCallback, StkId, TmKind, get_metamethod_event,
 };
 use crate::lua_vm::{
     LUA_HOOKCALL, LUA_HOOKCOUNT, LUA_HOOKLINE, LUA_HOOKRET, LUA_HOOKTAILCALL, async_thread,
@@ -237,7 +237,7 @@ impl LuaState {
     }
 
     #[inline]
-    pub(crate) fn release(&mut self) {
+    pub(crate) fn release_ci(&mut self) {
         self.call_depth = 0;
         self.call_stack.clear();
         self.call_stack_storage.clear();
@@ -348,6 +348,7 @@ impl LuaState {
             let ci = unsafe { self.call_stack[self.call_depth].as_mut() };
             *ci = CallInfo {
                 base,
+                base_stk: self.ci_base_stk(base),
                 func_offset: 1,
                 top: frame_top as u32,
                 pc: 0,
@@ -361,6 +362,7 @@ impl LuaState {
             // Slow path: allocate new stable CallInfo slot (first time reaching this depth)
             self.alloc_call_info_slot(CallInfo {
                 base,
+                base_stk: self.ci_base_stk(base),
                 func_offset: 1,
                 top: frame_top as u32,
                 pc: 0,
@@ -412,6 +414,7 @@ impl LuaState {
         let ci = unsafe { self.call_stack.get_unchecked(self.call_depth).as_mut() };
         *ci = CallInfo {
             base,
+            base_stk: self.ci_base_stk(base),
             func_offset: 1,
             top: frame_top as u32,
             pc: 0,
@@ -460,6 +463,7 @@ impl LuaState {
             let ci = unsafe { self.call_stack.get_unchecked(self.call_depth).as_mut() };
             *ci = CallInfo {
                 base,
+                base_stk: self.ci_base_stk(base),
                 func_offset: 1,
                 top: frame_top as u32,
                 pc: 0,
@@ -554,6 +558,7 @@ impl LuaState {
             let ci = unsafe { self.call_stack.get_unchecked(self.call_depth).as_mut() };
             *ci = CallInfo {
                 base,
+                base_stk: self.ci_base_stk(base),
                 func_offset: 1,
                 top: frame_top as u32,
                 pc: 0,
@@ -566,6 +571,7 @@ impl LuaState {
         } else {
             self.alloc_call_info_slot(CallInfo {
                 base,
+                base_stk: self.ci_base_stk(base),
                 func_offset: 1,
                 top: frame_top as u32,
                 pc: 0,
@@ -618,6 +624,7 @@ impl LuaState {
             let ci = unsafe { self.call_stack.get_unchecked(self.call_depth).as_mut() };
             *ci = CallInfo {
                 base,
+                base_stk: self.ci_base_stk(base),
                 chunk_ptr: std::ptr::null(),
                 upvalue_ptrs: std::ptr::null(),
                 func_offset: 1,
@@ -630,6 +637,7 @@ impl LuaState {
         } else {
             self.alloc_call_info_slot(CallInfo {
                 base,
+                base_stk: self.ci_base_stk(base),
                 chunk_ptr: std::ptr::null(),
                 upvalue_ptrs: std::ptr::null(),
                 func_offset: 1,
@@ -765,8 +773,9 @@ impl LuaState {
         let capacity = self.stack.capacity();
         self.stack.resize(new_size, LuaValue::nil());
         if self.stack.capacity() > capacity {
-            // If the vector had to reallocate, we need to update all open upvalue pointers
+            // If the vector had to reallocate, we need to update all cached stack pointers
             self.fix_open_upvalue_pointers();
+            self.fix_call_info_base_stk();
         }
 
         Ok(())
@@ -776,17 +785,35 @@ impl LuaState {
     /// Must be called whenever the stack Vec's internal buffer moves
     /// (e.g., after Vec::push triggers a reallocation).
     pub fn fix_open_upvalue_pointers(&mut self) {
+        let sp = self.stack.as_mut_ptr();
         for upval_ptr in &self.open_upvalues_list {
             let data = &mut upval_ptr.as_mut_ref().data;
             // All entries in open_upvalues_list must be open
             debug_assert!(data.is_open());
             let stack_index = data.get_stack_index();
             if stack_index < self.stack.len() {
-                data.update_stack_ptr(
-                    (&self.stack[stack_index]) as *const LuaValue as *mut LuaValue,
-                );
+                data.update_stack_ptr(StkId::from_mut_ptr(unsafe { sp.add(stack_index) }));
             }
         }
+    }
+
+    #[inline(always)]
+    fn ci_base_stk(&self, base: usize) -> StkId {
+        StkId::from_stack(self.stack.as_ptr() as *mut LuaValue, base)
+    }
+
+    fn fix_call_info_base_stk(&mut self) {
+        let sp = self.stack.as_mut_ptr();
+        for ci_ptr in self.call_stack.iter() {
+            let ci = unsafe { &mut *ci_ptr.as_ptr() };
+            ci.base_stk = StkId::from_stack(sp, ci.base);
+        }
+    }
+
+    pub(crate) fn offset_of_stk_id(&self, stk_id: StkId) -> i32 {
+        let sp = self.stack.as_ptr() as *const LuaValue;
+        let offset = (stk_id.as_ptr() as usize).wrapping_sub(sp as usize);
+        (offset / std::mem::size_of::<LuaValue>()) as i32
     }
 
     /// Get register relative to current frame base
@@ -1533,11 +1560,9 @@ impl LuaState {
 
         // Not found, create a new one
         let upval_ptr = {
-            let ptr = LuaValuePtr {
-                ptr: unsafe { self.stack.as_mut_ptr().add(stack_index) },
-            };
+            let stk_id = StkId::from_mut_ptr(unsafe { self.stack.as_mut_ptr().add(stack_index) });
             let vm = self.global_state_mut();
-            vm.create_upvalue_open(stack_index, ptr)?
+            vm.create_upvalue_open(stack_index, stk_id)?
         };
 
         self.open_upvalues_list.insert(insert_pos, upval_ptr);
@@ -2103,10 +2128,10 @@ impl LuaState {
     pub fn create_upvalue_open(
         &mut self,
         stack_index: usize,
-        stack_ptr: LuaValuePtr,
+        stk_id: StkId,
     ) -> LuaResult<UpvaluePtr> {
         self.global_state_mut()
-            .create_upvalue_open(stack_index, stack_ptr)
+            .create_upvalue_open(stack_index, stk_id)
     }
 
     /// Create a raw string value.

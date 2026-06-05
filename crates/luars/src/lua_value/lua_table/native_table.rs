@@ -265,7 +265,7 @@ impl NativeTable {
     /// Zero-copy short string lookup — writes directly to destination pointer.
     /// Assumes hash is non-empty and key is short string.
     /// Returns true if found and written.
-    pub unsafe fn get_shortstr_into(&self, key: &LuaValue, dest: *mut LuaValue) -> bool {
+    pub(crate) fn get_shortstr_into(&self, key: &LuaValue, dest: *mut LuaValue) -> bool {
         let mut node = self.mainposition_string(key);
         let key_ptr = key.string_ptr_raw();
 
@@ -1160,7 +1160,7 @@ impl NativeTable {
     /// Returns true if a non-nil/non-empty value was found and written.
     /// CRITICAL: #[inline(always)] — this is the hot path for t[i] reads.
     #[inline(always)]
-    pub unsafe fn fast_geti_into(&self, key: i64, dest: *mut LuaValue) -> bool {
+    pub(crate) fn fast_geti_into(&self, key: i64, dest: *mut LuaValue) -> bool {
         unsafe {
             let u = (key as u64).wrapping_sub(1);
             if u < self.asize as u64 {
@@ -1181,7 +1181,7 @@ impl NativeTable {
     /// Used as fallback when fast_geti_into misses (key not in array range).
     /// Mirrors C Lua's getintfromhash() + finishnodeget().
     #[inline(always)]
-    pub unsafe fn get_int_from_hash_into(&self, key: i64, dest: *mut LuaValue) -> bool {
+    pub(crate) fn get_int_from_hash_into(&self, key: i64, dest: *mut LuaValue) -> bool {
         if self.node.is_null() {
             return false;
         }

@@ -399,7 +399,7 @@ impl GC {
     #[inline]
     fn prepare_object_for_release(obj: &mut GcObjectOwner) {
         if let Some(thread) = obj.as_thread_mut() {
-            thread.release();
+            thread.release_ci();
         }
     }
 

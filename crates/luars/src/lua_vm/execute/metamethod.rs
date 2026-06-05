@@ -9,7 +9,7 @@ use crate::lua_vm::execute::helper::{get_binop_metamethod, get_metamethod_from_m
 ///
 /// Implements MMBIN, MMBINI, MMBINK opcodes
 /// Based on Lua 5.5 ltm.c
-use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metamethod_event};
+use crate::lua_vm::{LuaError, LuaResult, LuaState, StkId, get_metamethod_event};
 use crate::stdlib::debug;
 
 /// Try unary metamethod (for __unm, __bnot)
@@ -383,7 +383,7 @@ pub fn call_tm_res_into(
     metamethod: LuaValue,
     arg1: LuaValue,
     arg2: LuaValue,
-    dest_reg: usize,
+    dest_stk_id: StkId,
 ) -> LuaResult<()> {
     let func_pos = {
         let ci_top = lua_state
@@ -441,11 +441,11 @@ pub fn call_tm_res_into(
     } else if metamethod.is_cfunction() {
         call_c_function(lua_state, func_pos, 2, 1)?;
     } else {
-        return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
+        return Err(debug::callerror(lua_state, &metamethod));
     }
 
     let result = lua_state.stack()[func_pos];
-    lua_state.stack_mut()[dest_reg] = result;
+    dest_stk_id.write(&result);
     lua_state.set_top_raw(func_pos);
     Ok(())
 }
