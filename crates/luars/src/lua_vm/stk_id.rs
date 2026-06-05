@@ -10,6 +10,7 @@
 
 use crate::{
     LuaRawTable,
+    gc::{GcObjectPtr, TablePtr},
     lua_value::{
         LUA_VFALSE, LUA_VNIL, LUA_VNUMFLT, LUA_VNUMINT, LUA_VTRUE, LuaInnerValue, LuaValue,
     },
@@ -68,6 +69,11 @@ impl StkId {
     }
 
     #[inline(always)]
+    pub fn is_nil(self) -> bool {
+        unsafe { (*self.0).tt == LUA_VNIL }
+    }
+
+    #[inline(always)]
     pub fn is_false_or_nil(self) -> bool {
         unsafe {
             let tt = (*self.0).tt;
@@ -95,6 +101,26 @@ impl StkId {
     #[inline(always)]
     pub fn hvalue(self) -> &'static LuaRawTable {
         unsafe { (*self.0).hvalue() }
+    }
+
+    #[inline(always)]
+    pub fn hvalue_mut(self) -> &'static mut LuaRawTable {
+        unsafe { (*self.0).hvalue_mut() }
+    }
+
+    #[inline(always)]
+    pub fn as_gc_ptr(self) -> GcObjectPtr {
+        unsafe { (*self.0).as_gc_ptr_unchecked() }
+    }
+
+    #[inline(always)]
+    pub fn as_table_ptr(self) -> TablePtr {
+        unsafe { (*self.0).as_table_ptr().expect("Table pointer expected") }
+    }
+
+    #[inline(always)]
+    pub fn is_collectable(self) -> bool {
+        unsafe { (*self.0).is_collectable() }
     }
 
     // ===== Value Writes =====
