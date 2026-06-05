@@ -67,6 +67,7 @@ impl Instruction {
     pub const POS_SJ: u32 = Self::POS_A;
 
     // Maximum values
+    pub const MAX_OP: u32 = (1 << Self::SIZE_OP) - 1;
     pub const MAX_A: u32 = (1 << Self::SIZE_A) - 1;
     pub const MAX_B: u32 = (1 << Self::SIZE_B) - 1;
     pub const MAX_C: u32 = (1 << Self::SIZE_C) - 1;
@@ -82,7 +83,7 @@ impl Instruction {
     pub const OFFSET_SBX: i32 = (Self::MAX_BX >> 1) as i32;
     pub const OFFSET_SJ: i32 = (Self::MAX_SJ >> 1) as i32;
 
-    // Create masks
+    // Generic mask helpers (used by setters and uncommon getters)
     #[inline(always)]
     fn mask1(n: u32, p: u32) -> u32 {
         (!((!0u32) << n)) << p
@@ -93,60 +94,52 @@ impl Instruction {
         !Self::mask1(n, p)
     }
 
-    // Get/Set opcode
+    // ── Hot getters — direct const-folded shift+mask (endian-agnostic) ──
+    //
+    // Each method expands to a single `(word >> CONST) & CONST` that LLVM
+    // folds into the optimal 1–2 instruction sequence on any architecture.
+    // No function call to `get_arg`, no runtime `mask1` computation.
+
     #[inline(always)]
     pub fn get_opcode(self) -> OpCode {
-        let op_byte = ((self.0 >> Self::POS_OP) & Self::mask1(Self::SIZE_OP, 0)) as u8;
-        OpCode::from_u8(op_byte)
+        OpCode::from_u8((self.0 & Self::MAX_OP) as u8)
     }
 
-    #[inline(always)]
-    pub fn set_opcode(&mut self, op: OpCode) {
-        self.0 = (self.0 & Self::mask0(Self::SIZE_OP, Self::POS_OP))
-            | (((op as u32) << Self::POS_OP) & Self::mask1(Self::SIZE_OP, Self::POS_OP));
-    }
-
-    // Generic argument getter
-    #[inline(always)]
-    fn get_arg(&self, pos: u32, size: u32) -> u32 {
-        (self.0 >> pos) & Self::mask1(size, 0)
-    }
-
-    // Generic argument setter
-    #[inline(always)]
-    fn set_arg(&mut self, v: u32, pos: u32, size: u32) {
-        self.0 = (self.0 & Self::mask0(size, pos)) | ((v << pos) & Self::mask1(size, pos));
-    }
-
-    // Field accessors
     #[inline(always)]
     pub fn get_a(self) -> u32 {
-        self.get_arg(Self::POS_A, Self::SIZE_A)
-    }
-
-    #[inline(always)]
-    pub fn set_a(&mut self, v: u32) {
-        self.set_arg(v, Self::POS_A, Self::SIZE_A);
+        (self.0 >> Self::POS_A) & Self::MAX_A
     }
 
     #[inline(always)]
     pub fn get_b(self) -> u32 {
-        self.get_arg(Self::POS_B, Self::SIZE_B)
-    }
-
-    #[inline(always)]
-    pub fn get_sb(self) -> i32 {
-        self.get_b() as i32 - Self::OFFSET_SB
-    }
-
-    #[inline(always)]
-    pub fn set_b(&mut self, v: u32) {
-        self.set_arg(v, Self::POS_B, Self::SIZE_B);
+        (self.0 >> Self::POS_B) & Self::MAX_B
     }
 
     #[inline(always)]
     pub fn get_c(self) -> u32 {
-        self.get_arg(Self::POS_C, Self::SIZE_C)
+        (self.0 >> Self::POS_C) & Self::MAX_C
+    }
+
+    #[inline(always)]
+    pub fn get_k(self) -> bool {
+        (self.0 >> Self::POS_K) & 1 != 0
+    }
+
+    #[inline(always)]
+    pub fn get_bx(self) -> u32 {
+        (self.0 >> Self::POS_BX) & Self::MAX_BX
+    }
+
+    #[inline(always)]
+    pub fn get_ax(self) -> u32 {
+        (self.0 >> Self::POS_AX) & Self::MAX_AX
+    }
+
+    // ── Derived signed getters ──
+
+    #[inline(always)]
+    pub fn get_sb(self) -> i32 {
+        self.get_b() as i32 - Self::OFFSET_SB
     }
 
     #[inline(always)]
@@ -155,13 +148,46 @@ impl Instruction {
     }
 
     #[inline(always)]
-    pub fn set_c(&mut self, v: u32) {
-        self.set_arg(v, Self::POS_C, Self::SIZE_C);
+    pub fn get_sbx(self) -> i32 {
+        self.get_bx() as i32 - Self::OFFSET_SBX
     }
 
     #[inline(always)]
-    pub fn get_k(self) -> bool {
-        self.get_arg(Self::POS_K, Self::SIZE_K) != 0
+    pub fn get_sj(self) -> i32 {
+        self.get_ax() as i32 - Self::OFFSET_SJ
+    }
+
+    // ── Setters and rare getters (keep generic shift/mask) ──
+
+    #[inline(always)]
+    pub fn set_opcode(&mut self, op: OpCode) {
+        self.0 = (self.0 & Self::mask0(Self::SIZE_OP, Self::POS_OP))
+            | (((op as u32) << Self::POS_OP) & Self::mask1(Self::SIZE_OP, Self::POS_OP));
+    }
+
+    #[inline(always)]
+    fn get_arg(&self, pos: u32, size: u32) -> u32 {
+        (self.0 >> pos) & Self::mask1(size, 0)
+    }
+
+    #[inline(always)]
+    fn set_arg(&mut self, v: u32, pos: u32, size: u32) {
+        self.0 = (self.0 & Self::mask0(size, pos)) | ((v << pos) & Self::mask1(size, pos));
+    }
+
+    #[inline(always)]
+    pub fn set_a(&mut self, v: u32) {
+        self.set_arg(v, Self::POS_A, Self::SIZE_A);
+    }
+
+    #[inline(always)]
+    pub fn set_b(&mut self, v: u32) {
+        self.set_arg(v, Self::POS_B, Self::SIZE_B);
+    }
+
+    #[inline(always)]
+    pub fn set_c(&mut self, v: u32) {
+        self.set_arg(v, Self::POS_C, Self::SIZE_C);
     }
 
     #[inline(always)]
@@ -170,33 +196,13 @@ impl Instruction {
     }
 
     #[inline(always)]
-    pub fn get_bx(self) -> u32 {
-        self.get_arg(Self::POS_BX, Self::SIZE_BX)
-    }
-
-    #[inline(always)]
-    pub fn get_sbx(self) -> i32 {
-        self.get_bx() as i32 - Self::OFFSET_SBX
-    }
-
-    #[inline(always)]
     pub fn set_bx(&mut self, v: u32) {
         self.set_arg(v, Self::POS_BX, Self::SIZE_BX);
     }
 
     #[inline(always)]
-    pub fn get_ax(self) -> u32 {
-        self.get_arg(Self::POS_AX, Self::SIZE_AX)
-    }
-
-    #[inline(always)]
     pub fn set_ax(&mut self, v: u32) {
         self.set_arg(v, Self::POS_AX, Self::SIZE_AX);
-    }
-
-    #[inline(always)]
-    pub fn get_sj(self) -> i32 {
-        self.get_arg(Self::POS_SJ, Self::SIZE_SJ) as i32 - Self::OFFSET_SJ
     }
 
     #[inline(always)]

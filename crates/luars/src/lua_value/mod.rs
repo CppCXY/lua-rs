@@ -30,12 +30,7 @@ pub(crate) type LuaInnerValue = Value; // For internal use within LuaValue imple
 
 use crate::Instruction;
 use crate::gc::{ProtoPtr, UpvaluePtr};
-use crate::lua_vm::CFunction;
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct LuaValuePtr {
-    pub ptr: *mut LuaValue,
-}
+use crate::lua_vm::{CFunction, StkId};
 
 /// Runtime upvalue — pointer-based design matching C Lua's UpVal.
 ///
@@ -48,7 +43,7 @@ pub struct LuaValuePtr {
 pub struct LuaUpvalue {
     /// Always-valid pointer to the upvalue's current value.
     /// Open → stack slot, Closed → &self.closed_value
-    v: *mut LuaValue,
+    v: StkId,
     /// Storage for the closed value. When closed, `v` points here.
     closed_value: LuaValue,
     /// Stack index (only meaningful when open)
@@ -59,9 +54,9 @@ impl LuaUpvalue {
     /// Create an open upvalue pointing to a stack location (absolute index).
     /// `stack_ptr` must remain valid until the upvalue is closed or the pointer is updated.
     #[inline(always)]
-    pub fn new_open(stack_index: usize, stack_ptr: LuaValuePtr) -> Self {
+    pub fn new_open(stack_index: usize, stk_id: StkId) -> Self {
         LuaUpvalue {
-            v: stack_ptr.ptr,
+            v: stk_id,
             closed_value: LuaValue::nil(),
             stack_index,
         }
@@ -73,7 +68,7 @@ impl LuaUpvalue {
     #[inline(always)]
     pub fn new_closed(value: LuaValue) -> Self {
         LuaUpvalue {
-            v: std::ptr::null_mut(),
+            v: StkId::null(),
             closed_value: value,
             stack_index: 0,
         }
@@ -84,8 +79,8 @@ impl LuaUpvalue {
     /// No-op for open upvalues (where v is already a valid stack pointer).
     #[inline(always)]
     pub fn fix_closed_ptr(&mut self) {
-        if self.v.is_null() {
-            self.v = &mut self.closed_value as *mut LuaValue;
+        if !self.v.is_valid() {
+            self.v = StkId::from_mut_ptr(&mut self.closed_value as *mut LuaValue);
         }
     }
 
@@ -93,7 +88,7 @@ impl LuaUpvalue {
     /// Open ⟺ `v` does NOT point to our own `closed_value` field.
     #[inline(always)]
     pub fn is_open(&self) -> bool {
-        !std::ptr::eq(self.v, &self.closed_value)
+        !std::ptr::eq(self.v.as_ptr(), &self.closed_value)
     }
 
     /// Get the stack index (only meaningful when open).
@@ -107,101 +102,43 @@ impl LuaUpvalue {
     #[inline(always)]
     pub fn close(&mut self, stack_value: LuaValue) {
         self.closed_value = stack_value;
-        self.v = &mut self.closed_value as *mut LuaValue;
+        self.v = StkId::from_mut_ptr(&mut self.closed_value as *mut LuaValue);
     }
 
     /// Update the cached stack pointer (called after stack reallocation).
     #[inline(always)]
-    pub fn update_stack_ptr(&mut self, ptr: *mut LuaValue) {
-        self.v = ptr;
+    pub fn update_stack_ptr(&mut self, stk_id: StkId) {
+        self.v = stk_id;
     }
 
     /// Get the raw v pointer (for caching in the execute loop).
     #[inline(always)]
-    pub fn get_v_ptr(&self) -> *mut LuaValue {
+    pub fn get_v_stk_id(&self) -> StkId {
         self.v
     }
 
     /// Get the value with **zero branching** — single pointer dereference.
     #[inline(always)]
     pub fn get_value(&self) -> LuaValue {
-        debug_assert!(!self.v.is_null(), "upvalue get_value: null pointer");
-        debug_assert!(
-            (self.v as usize) > 0x10000,
-            "upvalue get_value: suspiciously low pointer {:p} (stack_index={})",
-            self.v,
-            self.stack_index
-        );
-        let val = unsafe { *self.v };
-        debug_assert!(
-            Self::is_valid_tt(val.tt()),
-            "upvalue get_value: INVALID type tag 0x{:02X} read from {:p} (stack_index={}, is_open={}). Likely dangling pointer!",
-            val.tt(),
-            self.v,
-            self.stack_index,
-            self.is_open()
-        );
-        val
+        self.v.get()
     }
 
     /// Get reference to the value with **zero branching**.
     #[inline(always)]
     pub fn get_value_ref(&self) -> &LuaValue {
-        debug_assert!(!self.v.is_null(), "upvalue get_value_ref: null pointer");
-        unsafe { &*self.v }
+        self.v.get_ref()
     }
 
     /// Set the value with **zero branching** — single pointer write.
     #[inline(always)]
     pub fn set_value(&mut self, val: LuaValue) {
-        debug_assert!(!self.v.is_null(), "upvalue set_value: null pointer");
-        debug_assert!(
-            (self.v as usize) > 0x10000,
-            "upvalue set_value: suspiciously low pointer {:p} (stack_index={})",
-            self.v,
-            self.stack_index
-        );
-        unsafe { *self.v = val }
+        self.v.write(&val);
     }
 
     /// Set the value by raw parts to avoid constructing a temporary LuaValue.
     #[inline(always)]
     pub fn set_value_parts(&mut self, value: Value, tt: u8) {
-        debug_assert!(!self.v.is_null(), "upvalue set_value_parts: null pointer");
-        debug_assert!(
-            (self.v as usize) > 0x10000,
-            "upvalue set_value_parts: suspiciously low pointer {:p} (stack_index={})",
-            self.v,
-            self.stack_index
-        );
-        unsafe {
-            (*self.v).value = value;
-            (*self.v).tt = tt;
-        }
-    }
-
-    /// Check if a type tag is valid (used for dangling pointer detection)
-    fn is_valid_tt(tt: u8) -> bool {
-        use crate::lua_value::lua_value::*;
-        matches!(
-            tt,
-            LUA_VNIL
-                | LUA_VEMPTY
-                | LUA_VABSTKEY
-                | LUA_VFALSE
-                | LUA_VTRUE
-                | LUA_VNUMINT
-                | LUA_VNUMFLT
-                | LUA_VSHRSTR
-                | LUA_VLNGSTR
-                | LUA_VTABLE
-                | LUA_VFUNCTION
-                | LUA_CCLOSURE
-                | LUA_VLCF
-                | LUA_VLIGHTUSERDATA
-                | LUA_VUSERDATA
-                | LUA_VTHREAD
-        )
+        self.v.write_parts(tt, value);
     }
 
     pub fn get_closed_value(&self) -> Option<&LuaValue> {

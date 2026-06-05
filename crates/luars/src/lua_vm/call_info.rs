@@ -1,8 +1,10 @@
 // CallInfo - Information about a single function call
 // Equivalent to CallInfo structure in Lua C API (lstate.h)
 
+use crate::LuaValue;
 use crate::gc::UpvaluePtr;
 use crate::lua_value::LuaProto;
+use crate::lua_vm::StkId;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
@@ -91,6 +93,11 @@ pub struct CallInfo {
     /// NOTE: This may be updated by VARARGPREP after stack rearrangement
     pub base: usize,
 
+    /// Cached raw pointer to this frame's base register (base + stack ptr).
+    /// Eliminates `stack_mut().as_mut_ptr().add(base)` in hot opcodes.
+    /// Updated on stack reallocation via `LuaState::fix_call_info_base_stk`.
+    pub base_stk: StkId,
+
     /// Offset from original base to func position (for vararg functions after buildhiddenargs)
     /// When nextraargs > 0 and buildhiddenargs was called:
     /// - func_offset = totalargs + 1 (the shift amount)
@@ -177,9 +184,10 @@ impl DerefMut for CallInfoPtr {
 
 impl CallInfo {
     /// Create a new call frame for a Lua function
-    pub fn new_lua(base: usize, nparams: usize) -> Self {
+    pub fn new_lua(sp: *mut LuaValue, base: usize, nparams: usize) -> Self {
         Self {
             base,
+            base_stk: StkId::from_stack(sp, base),
             chunk_ptr: std::ptr::null(),
             upvalue_ptrs: std::ptr::null(),
             func_offset: 1, // Initially base - 1 = func
@@ -192,9 +200,10 @@ impl CallInfo {
     }
 
     /// Create a new call frame for a C function
-    pub fn new_c(base: usize, nparams: usize) -> Self {
+    pub fn new_c(sp: *mut crate::lua_value::LuaValue, base: usize, nparams: usize) -> Self {
         Self {
             base,
+            base_stk: StkId::from_stack(sp, base),
             chunk_ptr: std::ptr::null(),
             upvalue_ptrs: std::ptr::null(),
             func_offset: 1,
@@ -275,6 +284,7 @@ impl Default for CallInfo {
     fn default() -> Self {
         Self {
             base: 0,
+            base_stk: StkId::null(),
             chunk_ptr: std::ptr::null(),
             upvalue_ptrs: std::ptr::null(),
             func_offset: 1,

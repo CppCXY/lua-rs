@@ -21,6 +21,7 @@ mod safe_option;
 mod sandbox;
 #[cfg(feature = "shared-proto")]
 mod shared_proto;
+pub(crate) mod stk_id;
 mod string_arth;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
@@ -29,9 +30,7 @@ use crate::gc::{
 };
 use crate::gc::{GC, ProtoPtr};
 use crate::lua_value::lua_convert::{FromLua, IntoLua};
-use crate::lua_value::{
-    LuaProto, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore,
-};
+use crate::lua_value::{LuaProto, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, UpvalueStore};
 pub use crate::lua_vm::call_info::{CallInfo, CallInfoPtr};
 use crate::lua_vm::const_string::ConstString;
 pub use crate::lua_vm::debug_info::DebugInfo;
@@ -44,6 +43,7 @@ pub use crate::lua_vm::lua_ref::{
     LUA_REFNIL, LuaAnyRef, LuaFunctionRef, LuaRefValue, LuaStringRef, LuaTableRef, RefId,
     UserDataRef,
 };
+pub(crate) use crate::lua_vm::stk_id::StkId;
 
 type ArithMetaFn = fn(&mut LuaState) -> LuaResult<usize>;
 pub use crate::lua_vm::lua_state::LuaState;
@@ -1247,9 +1247,9 @@ impl GlobalState {
     pub fn create_upvalue_open(
         &mut self,
         stack_index: usize,
-        ptr: LuaValuePtr,
+        stk_id: StkId,
     ) -> LuaResult<UpvaluePtr> {
-        let upval = LuaUpvalue::new_open(stack_index, ptr);
+        let upval = LuaUpvalue::new_open(stack_index, stk_id);
         self.object_allocator.create_upvalue(&mut self.gc, upval)
     }
 

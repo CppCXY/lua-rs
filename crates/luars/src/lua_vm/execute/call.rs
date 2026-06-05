@@ -5,8 +5,9 @@ use crate::{
     LUA_MASKCALL, LUA_MASKRET, LuaProto, LuaValue,
     gc::UpvaluePtr,
     lua_vm::{
-        CFunction, LUA_HOOKCALL, LUA_HOOKRET, LuaResult, LuaState, TmKind, call_info::call_status,
-        execute::hook::hook_on_return, get_metamethod_event, lua_limits::EXTRA_STACK,
+        CFunction, LUA_HOOKCALL, LUA_HOOKRET, LuaResult, LuaState, StkId, TmKind,
+        call_info::call_status, execute::hook::hook_on_return, get_metamethod_event,
+        lua_limits::EXTRA_STACK,
     },
 };
 
@@ -273,10 +274,12 @@ pub fn pretailcall_lua(
 
     // Batch update CI fields (reuse current frame, no push/pop)
     {
+        let sp = lua_state.stack_mut().as_mut_ptr();
         let ci = lua_state
             .current_frame_mut()
             .expect("call update requires an active call frame");
         ci.base = new_base;
+        ci.base_stk = StkId::from_stack(sp, new_base);
         ci.func_offset = 1;
         ci.top = frame_top as u32;
         ci.pc = 0;

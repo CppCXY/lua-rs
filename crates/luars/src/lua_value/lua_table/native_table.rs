@@ -265,7 +265,7 @@ impl NativeTable {
     /// Zero-copy short string lookup — writes directly to destination pointer.
     /// Assumes hash is non-empty and key is short string.
     /// Returns true if found and written.
-    pub unsafe fn get_shortstr_into(&self, key: &LuaValue, dest: *mut LuaValue) -> bool {
+    pub(crate) fn get_shortstr_into(&self, key: &LuaValue, dest: *mut LuaValue) -> bool {
         let mut node = self.mainposition_string(key);
         let key_ptr = key.string_ptr_raw();
 
@@ -388,7 +388,7 @@ impl NativeTable {
         self.pset_shortstr_parts(key, value.value, value.tt)
     }
 
-    pub fn pset_shortstr_parts(
+    pub(crate) fn pset_shortstr_parts(
         &mut self,
         key: &LuaValue,
         value: Value,
@@ -538,19 +538,6 @@ impl NativeTable {
         }
     }
 
-    pub fn finish_shortstr_set_parts(
-        &mut self,
-        key: &LuaValue,
-        value: Value,
-        tt: u8,
-        result: ShortStrSetResult,
-    ) -> (bool, isize) {
-        match result {
-            ShortStrSetResult::Done { new_key, mem_delta } => (new_key, mem_delta),
-            other => self.finish_shortstr_set(key, LuaValue::from_raw(value, tt), other),
-        }
-    }
-
     fn insert_new_shortstr(&mut self, key: &LuaValue, value: LuaValue) -> (bool, isize) {
         debug_assert!(key.is_short_string());
         debug_assert!(!value.is_nil());
@@ -673,7 +660,7 @@ impl NativeTable {
 
     /// Write value to array at Lua index (1-based)
     #[inline(always)]
-    pub unsafe fn write_array(&mut self, lua_index: i64, luaval: LuaValue) {
+    pub(crate) fn write_array(&mut self, lua_index: i64, luaval: LuaValue) {
         if lua_index < 1 || lua_index > self.asize as i64 {
             return;
         }
@@ -1160,7 +1147,7 @@ impl NativeTable {
     /// Returns true if a non-nil/non-empty value was found and written.
     /// CRITICAL: #[inline(always)] — this is the hot path for t[i] reads.
     #[inline(always)]
-    pub unsafe fn fast_geti_into(&self, key: i64, dest: *mut LuaValue) -> bool {
+    pub(crate) fn fast_geti_into(&self, key: i64, dest: *mut LuaValue) -> bool {
         unsafe {
             let u = (key as u64).wrapping_sub(1);
             if u < self.asize as u64 {
@@ -1181,7 +1168,7 @@ impl NativeTable {
     /// Used as fallback when fast_geti_into misses (key not in array range).
     /// Mirrors C Lua's getintfromhash() + finishnodeget().
     #[inline(always)]
-    pub unsafe fn get_int_from_hash_into(&self, key: i64, dest: *mut LuaValue) -> bool {
+    pub(crate) fn get_int_from_hash_into(&self, key: i64, dest: *mut LuaValue) -> bool {
         if self.node.is_null() {
             return false;
         }
@@ -1431,9 +1418,7 @@ impl NativeTable {
         }
         // Move each key: write to array, remove from hash
         for (k, v) in to_migrate {
-            unsafe {
-                self.write_array(k, v);
-            }
+            self.write_array(k, v);
             let key_val = LuaValue::integer(k);
             self.set_node(key_val, LuaValue::nil()); // mark dead in hash
         }
@@ -1678,9 +1663,7 @@ impl NativeTable {
             if i >= 1 && i <= self.asize as i64 {
                 // Key is in array range - set in array part ONLY
                 let was_nil = unsafe { self.read_array(i).is_none() };
-                unsafe {
-                    self.write_array(i, value);
-                }
+                self.write_array(i, value);
                 // DEFENSIVE: If setting to nil, also clear any stale hash entry
                 // for this integer key. This can happen when GC clearing corrupted
                 // lenhint and a key was placed in both array and hash parts.
@@ -1700,9 +1683,7 @@ impl NativeTable {
                 if i == current_len + 1 {
                     let new_size = ((i as u32).next_power_of_two()).max(4);
                     let delta = self.resize_array(new_size);
-                    unsafe {
-                        self.write_array(i, value);
-                    }
+                    self.write_array(i, value);
                     self.migrate_hash_int_keys_to_array();
                     return (true, delta);
                 }

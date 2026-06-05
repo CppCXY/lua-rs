@@ -483,22 +483,28 @@ impl GcObjectPtr {
     const PTR_MASK: u64 = (1u64 << 48) - 1; // low 48 bits
 
     // Tag values — must match GcObjectKind repr(u8)
-    const TAG_STRING: u64 = 0;
-    const TAG_TABLE: u64 = 1;
-    const TAG_FUNCTION: u64 = 2;
-    const TAG_CCLOSURE: u64 = 3;
-    const TAG_RCLOSURE: u64 = 4;
-    const TAG_UPVALUE: u64 = 5;
-    const TAG_THREAD: u64 = 6;
-    const TAG_USERDATA: u64 = 7;
-    const TAG_PROTO: u64 = 8;
+    pub const TAG_STRING: u64 = 0;
+    pub const TAG_TABLE: u64 = 1;
+    pub const TAG_FUNCTION: u64 = 2;
+    pub const TAG_CCLOSURE: u64 = 3;
+    pub const TAG_RCLOSURE: u64 = 4;
+    pub const TAG_UPVALUE: u64 = 5;
+    pub const TAG_THREAD: u64 = 6;
+    pub const TAG_USERDATA: u64 = 7;
+    pub const TAG_PROTO: u64 = 8;
+    pub const TAG_NONE: u64 = 9;
     #[inline(always)]
-    fn new_tagged(ptr: u64, tag: u64) -> Self {
+    pub fn new_tagged(ptr: u64, tag: u64) -> Self {
         debug_assert!(
             ptr & !Self::PTR_MASK == 0,
             "pointer exceeds 48 bits: 0x{ptr:016x}"
         );
         Self(ptr | (tag << Self::TAG_SHIFT))
+    }
+
+    #[inline(always)]
+    pub fn null() -> Self {
+        Self(0)
     }
 
     #[inline(always)]

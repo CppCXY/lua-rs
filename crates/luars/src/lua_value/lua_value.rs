@@ -1032,6 +1032,22 @@ impl LuaValue {
         }
     }
 
+    #[inline(always)]
+    pub(crate) fn as_gc_ptr_unchecked(&self) -> GcObjectPtr {
+        // Unsafe version for internal use when caller already knows it's a GC object
+        let tag = match self.tt {
+            LUA_VTABLE => GcObjectPtr::TAG_TABLE,
+            LUA_VFUNCTION => GcObjectPtr::TAG_FUNCTION,
+            LUA_CCLOSURE => GcObjectPtr::TAG_CCLOSURE,
+            LUA_VRCLOSURE => GcObjectPtr::TAG_RCLOSURE,
+            LUA_VSHRSTR | LUA_VLNGSTR => GcObjectPtr::TAG_STRING,
+            LUA_VTHREAD => GcObjectPtr::TAG_THREAD,
+            LUA_VUSERDATA => GcObjectPtr::TAG_USERDATA,
+            _ => GcObjectPtr::TAG_NONE,
+        };
+        GcObjectPtr::new_tagged(self.raw_ptr() as u64, tag)
+    }
+
     // ============ Truthiness (Lua semantics) ============
 
     /// l_isfalse - Lua truthiness: only nil and false are falsy

@@ -563,9 +563,8 @@ fn table_pack(l: &mut LuaState) -> LuaResult<usize> {
         }
         // Direct array write — table was created with array size = n,
         // so indices 1..n are guaranteed in-bounds
-        unsafe {
-            impl_table.write_array((i + 1) as i64, arg);
-        }
+
+        impl_table.write_array((i + 1) as i64, arg);
     }
 
     // Set "n" field through the LuaTable (needs to invalidate TM cache)
