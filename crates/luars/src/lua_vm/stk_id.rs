@@ -129,7 +129,10 @@ impl StkId {
     #[inline(always)]
     pub fn set(self, src: StkId) {
         unsafe {
-            *self.0 = *src.0;
+            // this is effectively a memcpy of the entire LuaValue (16 bytes), including the type tag and value fields
+            let src = *src.0;
+            (*self.0).tt = src.tt;
+            (*self.0).value = src.value;
         }
     }
 
@@ -137,7 +140,8 @@ impl StkId {
     #[inline(always)]
     pub fn write(self, v: &LuaValue) {
         unsafe {
-            *self.0 = *v;
+            (*self.0).tt = v.tt;
+            (*self.0).value = v.value;
         }
     }
 
@@ -214,5 +218,9 @@ impl StkId {
 
     pub fn get_ref(self) -> &'static LuaValue {
         unsafe { &*self.0 }
+    }
+
+    pub fn get_parts(self) -> (u8, LuaInnerValue) {
+        unsafe { ((*self.0).tt, (*self.0).value) }
     }
 }
