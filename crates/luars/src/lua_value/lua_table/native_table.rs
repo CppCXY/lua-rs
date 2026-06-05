@@ -388,7 +388,7 @@ impl NativeTable {
         self.pset_shortstr_parts(key, value.value, value.tt)
     }
 
-    pub fn pset_shortstr_parts(
+    pub(crate) fn pset_shortstr_parts(
         &mut self,
         key: &LuaValue,
         value: Value,

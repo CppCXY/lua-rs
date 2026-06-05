@@ -650,12 +650,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut meta = TablePtr::null();
                     if upval_value.is_table() {
                         let table = upval_value.hvalue_mut();
-                        let table_ptr = upval_value
-                            .as_table_ptr()
-                            .expect("SetTabUp fast path requires table");
-                        let gc_ptr = upval_value
-                            .as_gc_ptr()
-                            .expect("SetTabUp fast path requires collectable table");
+                        let table_ptr = upval_value.table_ptr_raw();
+                        let gc_ptr = upval_value.as_gc_ptr_unchecked();
                         meta = table.meta_ptr();
                         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
                             let (new_key, delta, is_collectable) = if instr.get_k() {
@@ -2213,10 +2209,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
 
                     if is_collectable {
-                        lua_state.gc_barrier_back(
-                            ra.as_gc_ptr()
-                                .expect("SetList fast path requires collectable table"),
-                        );
+                        lua_state.gc_barrier_back(ra.as_gc_ptr_unchecked());
                     }
                 }
                 OpCode::Closure => {

@@ -492,6 +492,7 @@ impl GcObjectPtr {
     pub const TAG_THREAD: u64 = 6;
     pub const TAG_USERDATA: u64 = 7;
     pub const TAG_PROTO: u64 = 8;
+    pub const TAG_NONE: u64 = 9;
     #[inline(always)]
     pub fn new_tagged(ptr: u64, tag: u64) -> Self {
         debug_assert!(

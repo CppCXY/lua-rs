@@ -115,7 +115,7 @@ impl StkId {
 
     #[inline(always)]
     pub fn as_table_ptr(self) -> TablePtr {
-        unsafe { (*self.0).as_table_ptr().expect("Table pointer expected") }
+        unsafe { (*self.0).table_ptr_raw() }
     }
 
     #[inline(always)]

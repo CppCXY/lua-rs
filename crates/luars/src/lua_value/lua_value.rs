@@ -1043,8 +1043,7 @@ impl LuaValue {
             LUA_VSHRSTR | LUA_VLNGSTR => GcObjectPtr::TAG_STRING,
             LUA_VTHREAD => GcObjectPtr::TAG_THREAD,
             LUA_VUSERDATA => GcObjectPtr::TAG_USERDATA,
-            // interal use only: caller must ensure it's a valid GC object type
-            _ => panic!("Invalid GC object type tag: {}", self.tt),
+            _ => GcObjectPtr::TAG_NONE,
         };
         GcObjectPtr::new_tagged(self.raw_ptr() as u64, tag)
     }
