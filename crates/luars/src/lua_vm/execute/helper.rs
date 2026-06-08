@@ -1,4 +1,4 @@
-use crate::lua_value::{LUA_VNIL, LUA_VNUMFLT, LUA_VNUMINT, LuaInnerValue};
+use crate::lua_value::{LUA_VNIL, LUA_VNUMINT, LuaInnerValue};
 use crate::stdlib::basic::parse_number::parse_lua_number;
 use crate::stdlib::debug::{objtypename, ordererror, typeerror};
 use crate::{
@@ -84,12 +84,6 @@ pub fn buildhiddenargs(
     Ok(new_base)
 }
 
-/// ttisinteger - 检查是否是整数 (最快的类型检查)
-#[inline(always)]
-pub unsafe fn pttisinteger(v: *const LuaValue) -> bool {
-    unsafe { (*v).ttisinteger() }
-}
-
 /// ttisinteger_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn ttisinteger(v: &LuaValue) -> bool {
@@ -109,13 +103,6 @@ pub fn ttisstring(v: &LuaValue) -> bool {
 }
 
 // ============ 值访问宏 (对应 Lua 的 ivalue/fltvalue) ============
-// OPTIMIZED: 指针版本，避免引用/解引用开销
-
-/// ivalue - 直接获取整数值 (调用前必须用 ttisinteger 检查)
-#[inline(always)]
-pub unsafe fn pivalue(v: *const LuaValue) -> i64 {
-    unsafe { (*v).ivalue() }
-}
 
 /// ivalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
@@ -123,34 +110,11 @@ pub fn ivalue(v: &LuaValue) -> i64 {
     v.ivalue()
 }
 
-#[inline(always)]
-pub fn chgivalue(v: &mut LuaValue, i: i64) {
-    v.value.i = i;
-}
-
-/// fltvalue_ref - 引用版本（保留兼容性）
-#[inline(always)]
-pub fn fltvalue(v: &LuaValue) -> f64 {
-    v.fltvalue()
-}
-
-#[inline(always)]
-pub fn chgfltvalue(v: &mut LuaValue, n: f64) {
-    v.value.n = n;
-}
-
 /// setivalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn setivalue(v: &mut LuaValue, i: i64) {
     v.tt = LUA_VNUMINT;
     v.value.i = i;
-}
-
-/// setfltvalue_ref - 引用版本（保留兼容性）
-#[inline(always)]
-pub fn setfltvalue(v: &mut LuaValue, n: f64) {
-    v.tt = LUA_VNUMFLT; // Lua 5.5's LUA_TNUMFLT is one more than LUA_VNUMINT
-    v.value.n = n;
 }
 
 /// setnilvalue_ref - 引用版本（保留兼容性）
@@ -191,25 +155,6 @@ pub fn tointegerns(v: &LuaValue, out: &mut i64) -> bool {
     } else {
         false
     }
-}
-
-/// tonumber - convert LuaValue to f64, including string coercion.
-/// Port of C Lua's luaV_tonumber_.
-pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
-    if tonumberns(v, out) {
-        return true;
-    }
-    if v.is_string() {
-        let result = parse_lua_number(v.as_str().unwrap_or(""));
-        if result.is_float() {
-            *out = unsafe { result.value.n };
-            return true;
-        } else if result.is_integer() {
-            *out = unsafe { result.value.i } as f64;
-            return true;
-        }
-    }
-    false
 }
 
 /// tonumberns - 引用版本
@@ -1058,24 +1003,20 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
     Ok(false)
 }
 
-pub fn forprep(lua_state: &mut LuaState, ra_pos: usize) -> LuaResult<bool> {
-    let stack = lua_state.stack();
-    let init_pos = ra_pos;
-    let limit_pos = ra_pos + 1;
-    let step_pos = ra_pos + 2;
-    if ttisinteger(unsafe { stack.get_unchecked(init_pos) })
-        && ttisinteger(unsafe { stack.get_unchecked(step_pos) })
-    {
+pub fn forprep(lua_state: &mut LuaState, ra: StkId) -> LuaResult<bool> {
+    let r_init = ra;
+    let r_limit = ra.offset(1);
+    let r_step = ra.offset(2);
+    if r_init.is_integer() && r_step.is_integer() {
         // Integer loop (init and step are integers)
-        let init = ivalue(unsafe { stack.get_unchecked(init_pos) });
-        let step = ivalue(unsafe { stack.get_unchecked(step_pos) });
+        let init = r_init.ivalue();
+        let step = r_step.ivalue();
 
         if step == 0 {
             return Err(lua_state.error("'for' step is zero".to_string()));
         }
         // forlimit: convert limit to integer per C Lua 5.5 logic
-        let limit_val = *unsafe { stack.get_unchecked(limit_pos) };
-        let (limit, should_skip) = for_limit(lua_state, limit_val, init, step)?;
+        let (limit, should_skip) = for_limit(lua_state, r_limit, init, step)?;
 
         if should_skip {
             return Ok(true);
@@ -1102,10 +1043,9 @@ pub fn forprep(lua_state: &mut LuaState, ra_pos: usize) -> LuaResult<bool> {
                 ((init as u64).wrapping_sub(limit as u64)) / step_abs
             };
 
-            let stack = lua_state.stack_mut();
-            chgivalue(unsafe { stack.get_unchecked_mut(ra_pos) }, count as i64);
-            setivalue(unsafe { stack.get_unchecked_mut(ra_pos + 1) }, step);
-            chgivalue(unsafe { stack.get_unchecked_mut(ra_pos + 2) }, init);
+            ra.change_i(count as i64);
+            r_limit.set_integer(step);
+            r_step.change_i(init);
         }
     } else {
         // Float loop — delegate to existing handler
@@ -1113,21 +1053,16 @@ pub fn forprep(lua_state: &mut LuaState, ra_pos: usize) -> LuaResult<bool> {
         let mut limit = 0.0;
         let mut step = 0.0;
 
-        // Copy values for potential error messages (avoids borrow conflict)
-        let init_val = stack[init_pos];
-        let limit_val = stack[limit_pos];
-        let step_val = stack[step_pos];
-
-        if !tonumber(&limit_val, &mut limit) {
-            let t = objtypename(lua_state, &limit_val);
+        if !for_tonumber(r_limit, &mut limit) {
+            let t = objtypename(lua_state, r_limit.get_ref());
             return Err(lua_state.error(format!("bad 'for' limit (number expected, got {})", t)));
         }
-        if !tonumber(&step_val, &mut step) {
-            let t = objtypename(lua_state, &step_val);
+        if !for_tonumber(r_step, &mut step) {
+            let t = objtypename(lua_state, r_step.get_ref());
             return Err(lua_state.error(format!("bad 'for' step (number expected, got {})", t)));
         }
-        if !tonumber(&init_val, &mut init) {
-            let t = objtypename(lua_state, &init_val);
+        if !for_tonumber(ra, &mut init) {
+            let t = objtypename(lua_state, ra.get_ref());
             return Err(lua_state.error(format!(
                 "bad 'for' initial value (number expected, got {})",
                 t
@@ -1144,37 +1079,67 @@ pub fn forprep(lua_state: &mut LuaState, ra_pos: usize) -> LuaResult<bool> {
             init < limit
         };
 
-        let stack = lua_state.stack_mut();
         if should_skip {
             return Ok(true);
         } else {
-            setfltvalue(&mut stack[ra_pos], limit);
-            setfltvalue(&mut stack[ra_pos + 1], step);
-            setfltvalue(&mut stack[ra_pos + 2], init);
+            ra.set_float(limit);
+            r_limit.set_float(step);
+            r_step.set_float(init);
         }
     }
 
     Ok(false)
 }
 
+/// Port of C Lua 5.5's luaV_tonumber_ (lvm.c).
+/// Full conversion: handles strings in addition to integers/floats.
+/// Used by forprep where operands may be strings.
+/// Marked cold to keep the arithmetic hot path (ptonumberns) compact.
+fn for_tonumber(v: StkId, out: &mut f64) -> bool {
+    if v.is_float() {
+        *out = v.fltvalue();
+        true
+    } else if v.is_integer() {
+        *out = v.ivalue() as f64;
+        true
+    } else if v.get_ref().is_string() {
+        if let Some(s) = v.get_ref().as_str() {
+            let result = parse_lua_number(s);
+            if result.is_float() {
+                *out = result.fltvalue();
+                true
+            } else if result.is_integer() {
+                *out = result.ivalue() as f64;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
 fn for_limit(
     lua_state: &mut LuaState,
-    limit_val: LuaValue,
+    r_limit: StkId,
     init: i64,
     step: i64,
 ) -> LuaResult<(i64, bool)> {
     // Port of C Lua 5.5's forlimit (lvm.c:181-198)
     // Try converting the limit to integer (with floor or ceil depending on step direction)
     let mode = if step < 0 { 2 } else { 1 }; // 1=floor, 2=ceil
-    if let Some(lim) = tointeger_mode(&limit_val, mode) {
+    if let Some(lim) = tointeger_mode(r_limit.get_ref(), mode) {
         // Successfully converted to integer
         let skip = if step > 0 { init > lim } else { init < lim };
         Ok((lim, skip))
     } else {
         // Not coercible to integer. Try converting to float to check bounds.
         let mut flimit = 0.0;
-        if !tonumber(&limit_val, &mut flimit) {
-            return Err(error_for_bad_limit(lua_state, &limit_val));
+        if !for_tonumber(r_limit, &mut flimit) {
+            return Err(error_for_bad_limit(lua_state, r_limit.get_ref()));
         }
         // flim is a float out of integer bounds
         if 0.0 < flimit {
@@ -1195,14 +1160,13 @@ fn for_limit(
 
 #[cold]
 #[inline(never)]
-pub fn float_for_loop(lua_state: &mut LuaState, ra_pos: usize) -> bool {
-    let stack = lua_state.stack_mut();
-    let step = fltvalue(unsafe { stack.get_unchecked(ra_pos + 1) });
-    let limit = fltvalue(unsafe { stack.get_unchecked(ra_pos) });
-    let mut idx = fltvalue(unsafe { stack.get_unchecked(ra_pos + 2) });
+pub fn float_for_loop(ra: StkId) -> bool {
+    let step = ra.offset(1).fltvalue();
+    let limit = ra.fltvalue();
+    let mut idx = ra.offset(2).fltvalue();
     idx += step;
     if (step > 0.0 && idx <= limit) || (step <= 0.0 && idx >= limit) {
-        chgfltvalue(unsafe { stack.get_unchecked_mut(ra_pos + 2) }, idx);
+        ra.offset(2).change_f(idx);
         return true;
     }
 

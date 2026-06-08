@@ -32,10 +32,9 @@ use crate::{
             concat::{concat, try_concat_pair_utf8},
             helper::{
                 bin_tm_fallback, eq_fallback, error_div_by_zero, error_global, error_mod_by_zero,
-                float_for_loop, fltvalue, forprep, handle_pending_ops, instr_at, ivalue, k_val,
-                objlen, order_tm_fallback, pivalue, pk_val, pttisinteger, return0_with_hook,
-                return1_with_hook, tointegerns, tonumberns, ttisfloat, ttisinteger, ttisstring,
-                unary_tm_fallback,
+                float_for_loop, forprep, handle_pending_ops, instr_at, ivalue, k_val, objlen,
+                order_tm_fallback, pk_val, return0_with_hook, return1_with_hook, tointegerns,
+                tonumberns, ttisfloat, ttisinteger, ttisstring, unary_tm_fallback,
             },
             hook::{hook_check_instruction, hook_on_call},
             number::{le_num, lt_num},
@@ -918,9 +917,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let im = instr.get_sb();
                     let ra = base_stk.offset(a as usize).get_ref();
                     let cond = if ttisinteger(ra) {
-                        ivalue(ra) == im as i64
+                        ra.ivalue() == im as i64
                     } else if ttisfloat(ra) {
-                        fltvalue(ra) == im as f64
+                        ra.fltvalue() == im as f64
                     } else {
                         false
                     };
@@ -1385,34 +1384,34 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let bx = instr.get_bx() as usize;
 
-                    unsafe {
-                        let ra = base_stk.offset(a).as_ptr();
-                        // Check if integer loop (tag of step at ra+1)
-                        if pttisinteger(ra.add(1)) {
-                            // Integer loop (most common for numeric loops)
-                            // ra: counter (count of iterations left)
-                            // ra+1: step
-                            // ra+2: control variable (idx)
-                            let count = pivalue(ra) as u64;
-                            if count > 0 {
-                                // More iterations
-                                let step = pivalue(ra.add(1));
-                                let idx = pivalue(ra.add(2));
+                    let ra = base_stk.offset(a);
+                    let r_step = ra.offset(1);
+                    // Check if integer loop (tag of step at ra+1)
+                    if r_step.is_integer() {
+                        // Integer loop (most common for numeric loops)
+                        // ra: counter (count of iterations left, stored as unsigned)
+                        // ra+1: step
+                        // ra+2: control variable (idx)
+                        let count = ra.ivalue() as u64;
+                        if count > 0 {
+                            // More iterations
+                            let step = r_step.ivalue();
+                            let r_idx = ra.offset(2);
+                            let idx = r_idx.ivalue();
 
-                                // Update counter (decrement) - only write value, tag unchanged
-                                (*ra).value.i = count as i64 - 1;
-                                // Update control variable: idx += step - only write value
-                                (*ra.add(2)).value.i = idx.wrapping_add(step);
+                            // Update counter (decrement) - only write value, tag unchanged
+                            ra.change_i((count - 1) as i64);
+                            // Update control variable: idx += step - only write value
+                            r_idx.change_i(idx.wrapping_add(step));
 
-                                // Jump back
-                                pc -= bx;
-                            }
-                            // else: counter expired, exit loop
-                        } else if float_for_loop(lua_state, ci.base + a) {
-                            // Float loop with non-integer step
-                            // Jump back if loop continues
+                            // Jump back
                             pc -= bx;
                         }
+                        // else: counter expired, exit loop
+                    } else if float_for_loop(ra) {
+                        // Float loop with non-integer step
+                        // Jump back if loop continues
+                        pc -= bx;
                     }
 
                     updatetrap!();
@@ -1420,7 +1419,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::ForPrep => {
                     let a = instr.get_a();
                     savestate!();
-                    if forprep(lua_state, ci.base + a as usize)? {
+                    if forprep(lua_state, base_stk.offset(a as usize))? {
                         // Skip the loop body: jump forward past FORLOOP
                         pc += instr.get_bx() as usize + 1;
                     }

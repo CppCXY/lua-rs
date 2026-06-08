@@ -59,6 +59,11 @@ impl StkId {
     }
 
     #[inline(always)]
+    pub fn is_string(self) -> bool {
+        unsafe { (*self.0).is_string() }
+    }
+
+    #[inline(always)]
     pub fn is_float(self) -> bool {
         unsafe { (*self.0).tt == LUA_VNUMFLT }
     }
@@ -84,6 +89,11 @@ impl StkId {
     #[inline(always)]
     pub fn is_short_string(self) -> bool {
         unsafe { (*self.0).is_short_string() }
+    }
+
+    #[inline(always)]
+    pub fn tt(self) -> u8 {
+        unsafe { (*self.0).tt }
     }
 
     // ===== Value Reads =====
@@ -188,9 +198,18 @@ impl StkId {
     /// Write only the integer value field without touching the type tag.
     /// Used by FORLOOP for in-place counter/idx updates.
     #[inline(always)]
-    pub fn set_raw_i(self, i: i64) {
+    pub fn change_i(self, i: i64) {
         unsafe {
             (*self.0).value.i = i;
+        }
+    }
+
+    /// Write only the float value field without touching the type tag.
+    /// Used by FORLOOP for in-place counter/idx updates.
+    #[inline(always)]
+    pub fn change_f(self, n: f64) {
+        unsafe {
+            (*self.0).value.n = n;
         }
     }
 

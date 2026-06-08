@@ -1,5 +1,6 @@
 use crate::LuaValue;
 
+#[inline(never)]
 pub fn parse_lua_number(s: &str) -> LuaValue {
     let s = s.trim();
     if s.is_empty() || s.contains('\0') {
