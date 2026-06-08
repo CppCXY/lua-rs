@@ -228,7 +228,7 @@ pub fn exec_varargprep(
         // Use 0 for hash part to encourage ValueArray creation for efficient named varargs
         // ValueArray now supports "n" key natively
         let table_val = lua_state.create_table(nextra, 0)?;
-        let n_str = lua_state.create_string("n")?;
+        let n_str = lua_state.global_state().const_strings.str_n;
         let n_val = LuaValue::integer(nextra as i64);
 
         // Populate table

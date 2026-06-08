@@ -46,6 +46,8 @@ pub struct ConstString {
     pub str_hook_line: LuaValue,      // "line"
     pub str_hook_count: LuaValue,     // "count"
     pub str_hook_tail_call: LuaValue, // "tail call"
+
+    pub str_n: LuaValue, // "n" (for vararg table)
 }
 
 impl ConstString {
@@ -78,6 +80,7 @@ impl ConstString {
             str_hook_line: nil,
             str_hook_count: nil,
             str_hook_tail_call: nil,
+            str_n: nil,
         };
 
         // Pre-create all metamethod name strings indexed by TmKind discriminant
@@ -138,6 +141,7 @@ impl ConstString {
         cs.str_false = allocator.create_string(gc, "false").unwrap();
         cs.str_integer = allocator.create_string(gc, "integer").unwrap();
         cs.str_float = allocator.create_string(gc, "float").unwrap();
+        cs.str_n = allocator.create_string(gc, "n").unwrap();
 
         // Fix all metamethod name strings — they should never be collected
         // (like Lua's luaC_fix in luaT_init)
@@ -176,6 +180,7 @@ impl ConstString {
         gc.fixed(cs.str_hook_line.as_gc_ptr().unwrap());
         gc.fixed(cs.str_hook_count.as_gc_ptr().unwrap());
         gc.fixed(cs.str_hook_tail_call.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_n.as_gc_ptr().unwrap());
 
         cs.attach_to_gc(gc);
         cs
@@ -219,6 +224,7 @@ impl ConstString {
         share_lua_value(&mut self.str_hook_line);
         share_lua_value(&mut self.str_hook_count);
         share_lua_value(&mut self.str_hook_tail_call);
+        share_lua_value(&mut self.str_n);
     }
 
     /// Get pre-cached metamethod name string by TmKind enum value — O(1) array index.
