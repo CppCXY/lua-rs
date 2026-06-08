@@ -35,6 +35,7 @@ use crate::{
 // ── GET operations ──────────────────────────────────────────────
 
 /// GetTabUp: R[A] := UpValue[B][K[C]:shortstring]
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub(crate) fn op_get_tabup(
     lua_state: &mut LuaState,
