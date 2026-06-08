@@ -152,7 +152,7 @@ pub(crate) fn op_arithf_k(
 }
 
 // ── op_arith_check_zero: R[A] := iop(R[B], R[C]) with zero check ─
-
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub(crate) fn op_arith_check_zero(
     lua_state: &mut LuaState,
@@ -187,6 +187,7 @@ pub(crate) fn op_arith_check_zero(
 
 // ── op_arithK_check_zero: R[A] := iop(R[B], K[C]) with zero check ─
 
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub(crate) fn op_arithk_check_zero(
     lua_state: &mut LuaState,
