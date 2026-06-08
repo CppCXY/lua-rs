@@ -1253,15 +1253,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         // Continue closing remaining TBC variables (if any)
                         match lua_state.close_all(ci.base) {
                             Ok(()) => {
-                                #[cfg(not(feature = "sandbox"))]
-                                {
-                                    trap = lua_state.hook_mask != 0;
-                                }
-
-                                #[cfg(feature = "sandbox")]
-                                {
-                                    trap = lua_state.has_active_instruction_watch();
-                                }
+                                updatetrap!();
                             }
                             Err(LuaError::Yield) => {
                                 ci.call_status |= CIST_CLSRET;
@@ -1286,15 +1278,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             match lua_state.close_all(ci.base) {
                                 Ok(()) => {
-                                    #[cfg(not(feature = "sandbox"))]
-                                    {
-                                        trap = lua_state.hook_mask != 0;
-                                    }
-
-                                    #[cfg(feature = "sandbox")]
-                                    {
-                                        trap = lua_state.has_active_instruction_watch();
-                                    }
+                                    updatetrap!();
                                 }
                                 Err(LuaError::Yield) => {
                                     ci.call_status |= CIST_CLSRET;
@@ -1329,12 +1313,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     lua_state.set_top_raw(res);
                     // nil-fill if caller wanted results
                     if nresults > 0 {
-                        unsafe {
-                            let sp = lua_state.stack_mut().as_mut_ptr();
-                            for i in 0..nresults as usize {
-                                *sp.add(res + i) = LuaValue::nil();
-                            }
+                        let res_stk_id = StkId::from_stack(lua_state.stack_mut().as_mut_ptr(), res);
+
+                        for i in 0..nresults as usize {
+                            res_stk_id.offset(i).set_nil();
                         }
+
                         lua_state.set_top_raw(res + nresults as usize);
                     }
                     // Reload caller frame and continue dispatch (avoid outer loop roundtrip)
@@ -1359,20 +1343,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         lua_state.set_top_raw(res);
                     } else {
                         // Copy the single result value using StkId
-                        let val = base_stk.offset(instr.get_a() as usize).get();
-                        unsafe {
-                            let sp = lua_state.stack_mut().as_mut_ptr();
-                            *sp.add(res) = val;
-                        }
+                        let ra = base_stk.offset(instr.get_a() as usize);
+                        let r_res = StkId::from_stack(lua_state.stack_mut().as_mut_ptr(), res);
+                        r_res.set(ra);
                         lua_state.set_top_raw(res + 1);
                         // nil-fill if caller wanted more than 1
                         if nresults > 1 {
-                            unsafe {
-                                let sp = lua_state.stack_mut().as_mut_ptr();
-                                for i in 1..nresults as usize {
-                                    *sp.add(res + i) = LuaValue::nil();
-                                }
+                            for i in 1..nresults as usize {
+                                r_res.offset(i).set_nil();
                             }
+
                             lua_state.set_top_raw(res + nresults as usize);
                         }
                     }
