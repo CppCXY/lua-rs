@@ -6,6 +6,7 @@ pub(crate) mod helper;
 mod hook;
 pub(crate) mod metamethod;
 mod number;
+mod table_ops;
 mod vararg;
 
 pub use execute_loop::lua_execute;

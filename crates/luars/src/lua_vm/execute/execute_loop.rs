@@ -21,7 +21,6 @@
 use crate::{
     Instruction, LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET, LuaResult, LuaState,
     LuaValue, OpCode,
-    gc::TablePtr,
     lua_value::{BIT_ISCOLLECTABLE, LuaProto},
     lua_vm::{
         LuaError, StkId, TmKind,
@@ -32,16 +31,15 @@ use crate::{
             concat::{concat, try_concat_pair_utf8},
             helper::{
                 bin_tm_fallback, eq_fallback, error_div_by_zero, error_global, error_mod_by_zero,
-                finishget_fallback, finishset_fallback, float_for_loop, fltvalue, forprep,
-                handle_pending_ops, instr_at, ivalue, k_val, lua_fmod, lua_idiv, lua_imod,
-                lua_shiftl, lua_shiftr, luai_numpow, objlen, order_tm_fallback, pivalue, pk_val,
-                ptonumberns, pttisinteger, return0_with_hook, return1_with_hook,
-                self_shortstr_index_chain_fast, tointegerns, tonumberns, ttisfloat, ttisinteger,
-                ttisstring, unary_tm_fallback,
+                float_for_loop, fltvalue, forprep, handle_pending_ops, instr_at, ivalue, k_val,
+                lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr, luai_numpow, objlen,
+                order_tm_fallback, pivalue, pk_val, ptonumberns, pttisinteger, return0_with_hook,
+                return1_with_hook, tointegerns, tonumberns, ttisfloat, ttisinteger, ttisstring,
+                unary_tm_fallback,
             },
             hook::{hook_check_instruction, hook_on_call},
-            metamethod::call_newindex_tm_fast,
             number::{le_num, lt_num},
+            table_ops,
             vararg::{exec_varargprep, get_vararg, get_varargs},
         },
         lua_limits::EXTRA_STACK,
@@ -484,653 +482,124 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::GetTabUp => {
-                    // R[A] := UpValue[B][K[C]:shortstring]
-                    let a = instr.get_a();
-                    let upvalue_ptr = unsafe { *ci.upvalue_ptrs.add(instr.get_b() as usize) };
-                    let upval_value = upvalue_ptr.as_ref().data.get_value_ref();
-                    let key = k_val(constants, instr.get_c());
-                    let dest = base_stk.offset(a as usize);
-                    debug_assert!(
-                        key.is_short_string(),
-                        "GetTabUp key must be short string for fast path"
-                    );
-                    if upval_value.is_table() {
-                        let table = upval_value.hvalue();
-                        if !trap {
-                            let next_instr = instr_at(code, pc);
-                            if next_instr.get_opcode() == OpCode::GetField
-                                && next_instr.get_b() == a
-                            {
-                                let next_key = k_val(constants, next_instr.get_c());
-                                debug_assert!(
-                                    next_key.is_short_string(),
-                                    "GetField key must be short string for fast path"
-                                );
-
-                                if let Some(outer) = table.impl_table.get_shortstr_fast(key) {
-                                    if outer.is_table() {
-                                        let inner_table = outer.hvalue();
-                                        if inner_table.impl_table.has_hash()
-                                            && inner_table
-                                                .impl_table
-                                                .get_shortstr_into(next_key, dest.as_ptr())
-                                        {
-                                            pc += 1;
-                                            continue;
-                                        }
-                                    }
-
-                                    base_stk.offset(a as usize).write(&outer);
-                                    continue;
-                                }
-                            }
-                        }
-
-                        if table.impl_table.has_hash()
-                            && table.impl_table.get_shortstr_into(key, dest.as_ptr())
-                        {
-                            continue;
-                        }
-                    }
-                    savestate!();
-                    let upval_value = *upval_value;
-                    finishget_fallback(lua_state, ci, &upval_value, key, dest)?;
-                    syncbase!();
-                    updatetrap!();
-                }
-                OpCode::GetTable => {
-                    // GETTABLE: R[A] := R[B][R[C]]
-                    let a = instr.get_a();
-                    let b = instr.get_b();
-                    let c = instr.get_c();
-
-                    let rb = base_stk.offset(b as usize);
-                    let rc = base_stk.offset(c as usize);
-                    let dest = base_stk.offset(a as usize);
-                    if rb.is_table() {
-                        let table = rb.hvalue();
-
-                        // Hot path 1: integer key → array fast path
-                        if rc.is_integer() {
-                            let key = rc.ivalue();
-                            if table.impl_table.fast_geti_into(key, dest.as_ptr()) {
-                                continue;
-                            }
-                            if table.impl_table.get_int_from_hash_into(key, dest.as_ptr()) {
-                                continue;
-                            }
-                        }
-                        // Hot path 2: short string key → hash fast path (zero-copy)
-                        else if rc.is_short_string()
-                            && table.impl_table.has_hash()
-                            && table
-                                .impl_table
-                                .get_shortstr_into(rc.get_ref(), dest.as_ptr())
-                        {
-                            continue;
-                        }
-                        // Cold path: other key types, hash fallback for integers
-                        if let Some(val) = table.impl_table.raw_get(rc.get_ref()) {
-                            dest.write(&val);
-                            continue;
-                        }
-
-                        savestate!();
-                        finishget_fallback(lua_state, ci, rb.get_ref(), rc.get_ref(), dest)?;
-                        syncbase!();
-                        updatetrap!();
-                        continue;
-                    }
-
-                    // Metamethod / non-table fallback
-                    savestate!();
-                    finishget_fallback(lua_state, ci, rb.get_ref(), rc.get_ref(), dest)?;
-                    syncbase!();
-                    updatetrap!();
-                }
-                OpCode::GetI => {
-                    // GETI: R[A] := R[B][C] (integer key)
-                    let a = instr.get_a();
-                    let b = instr.get_b();
-                    let rc = instr.get_c() as i64;
-                    let rb = base_stk.offset(b as usize);
-                    let dest = base_stk.offset(a as usize);
-                    if rb.is_table() {
-                        let table = rb.hvalue();
-
-                        // fast_geti: try array part first
-                        let found = table.impl_table.fast_geti_into(rc, dest.as_ptr());
-                        if found {
-                            continue;
-                        }
-                        // fallback: direct integer hash lookup (no float/array re-check)
-                        let found = table.impl_table.get_int_from_hash_into(rc, dest.as_ptr());
-                        if found {
-                            continue;
-                        }
-                    }
-
-                    savestate!();
-                    finishget_fallback(lua_state, ci, rb.get_ref(), &LuaValue::integer(rc), dest)?;
-                    syncbase!();
-                    updatetrap!();
-                }
-                OpCode::GetField => {
-                    // GETFIELD: R[A] := R[B][K[C]:string]
-                    let rb = base_stk.offset(instr.get_b() as usize);
-                    let key = k_val(constants, instr.get_c());
-                    debug_assert!(
-                        key.is_short_string(),
-                        "GetField key must be short string for fast path"
-                    );
-                    if rb.is_table() {
-                        let table = rb.hvalue();
-                        if table.impl_table.has_hash() {
-                            let dest = base_stk.offset(instr.get_a() as usize);
-                            if table.impl_table.get_shortstr_into(key, dest.as_ptr()) {
-                                continue;
-                            }
-                        }
-                    }
-                    savestate!();
-                    let rb = rb.get();
-                    finishget_fallback(
+                    table_ops::op_get_tabup(
                         lua_state,
                         ci,
-                        &rb,
-                        key,
-                        base_stk.offset(instr.get_a() as usize),
+                        &mut base_stk,
+                        &mut pc,
+                        &mut trap,
+                        instr,
+                        code,
+                        constants,
                     )?;
-                    syncbase!();
-                    updatetrap!();
+                    continue;
+                }
+                OpCode::GetTable => {
+                    table_ops::op_get_table(
+                        lua_state,
+                        ci,
+                        &mut base_stk,
+                        &mut pc,
+                        &mut trap,
+                        instr,
+                        constants,
+                    )?;
+                    continue;
+                }
+                OpCode::GetI => {
+                    table_ops::op_get_i(
+                        lua_state,
+                        ci,
+                        &mut base_stk,
+                        &mut pc,
+                        &mut trap,
+                        instr,
+                        constants,
+                    )?;
+                    continue;
+                }
+                OpCode::GetField => {
+                    table_ops::op_get_field(
+                        lua_state,
+                        ci,
+                        &mut base_stk,
+                        &mut pc,
+                        &mut trap,
+                        instr,
+                        constants,
+                    )?;
+                    continue;
                 }
                 OpCode::SetTabUp => {
-                    // UpValue[A][K[B]:shortstring] := RK(C)
-                    let a = instr.get_a();
-                    let b = instr.get_b();
-                    let c = instr.get_c();
-                    let upvalue_ptr = unsafe { *ci.upvalue_ptrs.add(a as usize) };
-                    let upval_value = upvalue_ptr.as_ref().data.get_value_ref();
-                    let key = k_val(constants, b);
-                    debug_assert!(
-                        key.is_short_string(),
-                        "GetTabUp key must be short string for fast path"
-                    );
-                    let mut known_newindex_miss = false;
-                    let mut meta = TablePtr::null();
-                    if upval_value.is_table() {
-                        let table = upval_value.hvalue_mut();
-                        let table_ptr = upval_value.table_ptr_raw();
-                        let gc_ptr = upval_value.as_gc_ptr_unchecked();
-                        meta = table.meta_ptr();
-                        if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
-                            let (new_key, delta, is_collectable) = if instr.get_k() {
-                                let rc = *k_val(constants, c);
-                                let pset_result = table.impl_table.pset_shortstr(key, rc);
-                                let (new_key, delta) =
-                                    table.impl_table.finish_shortstr_set(key, rc, pset_result);
-                                (new_key, delta, rc.is_collectable())
-                            } else {
-                                let rc = base_stk.offset(c as usize);
-                                let pset_result = table.impl_table.pset_shortstr(key, rc.get());
-                                let (new_key, delta) = table.impl_table.finish_shortstr_set(
-                                    key,
-                                    rc.get(),
-                                    pset_result,
-                                );
-                                (new_key, delta, rc.is_collectable())
-                            };
-                            if new_key {
-                                table.invalidate_tm_cache();
-                            }
-                            if delta != 0 {
-                                lua_state.gc_track_table_resize(table_ptr, delta);
-                            }
-                            if is_collectable {
-                                lua_state.gc_barrier_back(gc_ptr);
-                            }
-                            continue;
-                        } else {
-                            let rc = if instr.get_k() {
-                                *k_val(constants, c)
-                            } else {
-                                base_stk.offset(c as usize).get()
-                            };
-                            if table.impl_table.set_existing_shortstr(key, rc) {
-                                if rc.is_collectable() {
-                                    lua_state.gc_barrier_back(gc_ptr);
-                                }
-                                continue;
-                            }
-                            known_newindex_miss = true;
-                        }
-                    }
-
-                    let upval_value = *upval_value;
-                    let rc = if instr.get_k() {
-                        *k_val(constants, c)
-                    } else {
-                        base_stk.offset(c as usize).get()
-                    };
-                    savestate!();
-                    if known_newindex_miss {
-                        if call_newindex_tm_fast(lua_state, ci, upval_value, meta, *key, rc)? {
-                            syncbase!();
-                            updatetrap!();
-                            continue;
-                        }
-                        finishset_fallback(lua_state, ci, &upval_value, key, rc, true)?;
-                    } else {
-                        finishset_fallback(lua_state, ci, &upval_value, key, rc, false)?;
-                    }
-                    syncbase!();
-                    updatetrap!();
+                    table_ops::op_set_tabup(
+                        lua_state,
+                        ci,
+                        &mut base_stk,
+                        &mut pc,
+                        &mut trap,
+                        instr,
+                        constants,
+                    )?;
+                    continue;
                 }
                 OpCode::SetTable => {
-                    // SETTABLE: R[A][R[B]] := RK(C)
-                    let a = instr.get_a();
-                    let b = instr.get_b();
-                    let c = instr.get_c();
-                    // Use StkId-derived raw pointers for fast table access
-                    let ra = base_stk.offset(a as usize);
-                    let rb = base_stk.offset(b as usize);
-
-                    // Hot path: table + integer key in array range, no __newindex
-                    // Deferred computation: table_ptr and gc barrier only when needed
-                    if ra.is_table() && rb.is_integer() {
-                        let table = ra.hvalue_mut();
-                        let key = rb.ivalue();
-                        let meta = table.meta_ptr();
-                        if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
-                            if !instr.get_k() {
-                                let rc = base_stk.offset(c as usize);
-                                if table.impl_table.fast_seti(key, rc.get()) {
-                                    if rc.is_collectable() {
-                                        lua_state.gc_barrier_back(ra.as_gc_ptr());
-                                    }
-                                    continue;
-                                }
-
-                                let rc = rc.get();
-                                let delta = table.impl_table.set_int_slow(key, rc);
-                                if delta != 0 {
-                                    lua_state.gc_track_table_resize(ra.as_table_ptr(), delta);
-                                }
-                                if rc.is_collectable() {
-                                    lua_state.gc_barrier_back(ra.as_gc_ptr());
-                                }
-                                continue;
-                            }
-
-                            let rc = *k_val(constants, c);
-                            if table.impl_table.fast_seti(key, rc) {
-                                if rc.is_collectable() {
-                                    lua_state.gc_barrier_back(ra.as_gc_ptr());
-                                }
-                                continue;
-                            }
-
-                            let delta = table.impl_table.set_int_slow(key, rc);
-                            if delta != 0 {
-                                lua_state.gc_track_table_resize(ra.as_table_ptr(), delta);
-                            }
-                            if rc.is_collectable() {
-                                lua_state.gc_barrier_back(ra.as_gc_ptr());
-                            }
-                            continue;
-                        } else {
-                            let rc = if instr.get_k() {
-                                *k_val(constants, c)
-                            } else {
-                                base_stk.offset(c as usize).get()
-                            };
-                            if table.impl_table.set_existing_int(key, rc) {
-                                if rc.is_collectable() {
-                                    lua_state.gc_barrier_back(ra.as_gc_ptr());
-                                }
-                                continue;
-                            }
-                            // Fall through to finishset fallback (known miss)
-                            let rc = if instr.get_k() {
-                                *k_val(constants, c)
-                            } else {
-                                base_stk.offset(c as usize).get()
-                            };
-                            savestate!();
-                            if call_newindex_tm_fast(lua_state, ci, ra.get(), meta, rb.get(), rc)? {
-                                syncbase!();
-                                updatetrap!();
-                                continue;
-                            }
-                            finishset_fallback(
-                                lua_state,
-                                ci,
-                                ra.get_ref(),
-                                rb.get_ref(),
-                                rc,
-                                true,
-                            )?;
-                            syncbase!();
-                            updatetrap!();
-                            continue;
-                        }
-                    }
-
-                    // Slow path: shortstr, generic key, non-table, or metamethod
-                    if ra.is_table() {
-                        let table = ra.hvalue_mut();
-                        let meta = table.meta_ptr();
-                        if (meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()))
-                            && rb.is_short_string()
-                        {
-                            let key = rb.get_ref();
-                            let (new_key, delta, needs_barrier) = if instr.get_k() {
-                                let rc = *k_val(constants, c);
-                                let pset_result = table.impl_table.pset_shortstr(key, rc);
-                                let (new_key, delta) =
-                                    table.impl_table.finish_shortstr_set(key, rc, pset_result);
-                                (new_key, delta, rc.is_collectable() || key.is_collectable())
-                            } else {
-                                let rc = base_stk.offset(c as usize);
-                                let pset_result = table.impl_table.pset_shortstr(key, rc.get());
-                                let (new_key, delta) = table.impl_table.finish_shortstr_set(
-                                    key,
-                                    rc.get(),
-                                    pset_result,
-                                );
-                                (new_key, delta, (rc.is_collectable() || rb.is_collectable()))
-                            };
-                            if new_key {
-                                table.invalidate_tm_cache();
-                            }
-                            if delta != 0 {
-                                lua_state.gc_track_table_resize(ra.as_table_ptr(), delta);
-                            }
-                            if needs_barrier {
-                                lua_state.gc_barrier_back(ra.as_gc_ptr());
-                            }
-                            continue;
-                        }
-                    }
-
-                    let rc = if instr.get_k() {
-                        *k_val(constants, c)
-                    } else {
-                        base_stk.offset(c as usize).get()
-                    };
-                    if ra.is_table() {
-                        let table = ra.hvalue_mut();
-                        let meta = table.meta_ptr();
-                        if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
-                            if !rb.is_nil() && !rb.is_integer() {
-                                let (_new_key, delta) = table.impl_table.raw_set(rb.get_ref(), rc);
-                                if delta != 0 {
-                                    lua_state.gc_track_table_resize(ra.as_table_ptr(), delta);
-                                }
-                                if rc.is_collectable() || rb.is_collectable() {
-                                    lua_state.gc_barrier_back(ra.as_gc_ptr());
-                                }
-                                continue;
-                            }
-                        } else if rb.is_short_string() {
-                            if table.impl_table.set_existing_shortstr(rb.get_ref(), rc) {
-                                if rc.is_collectable() || rb.is_collectable() {
-                                    lua_state.gc_barrier_back(ra.as_gc_ptr());
-                                }
-                                continue;
-                            }
-                            savestate!();
-                            if call_newindex_tm_fast(lua_state, ci, ra.get(), meta, rb.get(), rc)? {
-                                syncbase!();
-                                updatetrap!();
-                                continue;
-                            }
-                            finishset_fallback(
-                                lua_state,
-                                ci,
-                                ra.get_ref(),
-                                rb.get_ref(),
-                                rc,
-                                true,
-                            )?;
-                            syncbase!();
-                            updatetrap!();
-                            continue;
-                        }
-                    }
-                    savestate!();
-                    finishset_fallback(lua_state, ci, ra.get_ref(), rb.get_ref(), rc, false)?;
-                    syncbase!();
-                    updatetrap!();
+                    table_ops::op_set_table(
+                        lua_state,
+                        ci,
+                        &mut base_stk,
+                        &mut pc,
+                        &mut trap,
+                        instr,
+                        constants,
+                    )?;
+                    continue;
                 }
                 OpCode::SetI => {
-                    // SETI: R[A][B] := RK(C) (integer key)
-                    let ra = base_stk.offset(instr.get_a() as usize);
-                    let b = instr.get_b() as i64;
-                    let c = instr.get_c();
-
-                    // Hot path: table with no __newindex metamethod, key in array range
-                    if ra.is_table() {
-                        let table = ra.hvalue_mut();
-                        // Pre-extract table/gc pointers as Copy values to break borrow chain
-                        let table_ptr = ra.as_table_ptr();
-                        let gc_ptr = ra.as_gc_ptr();
-                        let meta = table.meta_ptr();
-                        if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
-                            if !instr.get_k() {
-                                let rc = base_stk.offset(c as usize);
-                                if table.impl_table.fast_seti(b, rc.get()) {
-                                    if rc.is_collectable() {
-                                        lua_state.gc_barrier_back(gc_ptr);
-                                    }
-                                    continue;
-                                }
-
-                                let delta = table.impl_table.set_int_slow(b, rc.get());
-                                if delta != 0 {
-                                    lua_state.gc_track_table_resize(table_ptr, delta);
-                                }
-                                if rc.is_collectable() {
-                                    lua_state.gc_barrier_back(gc_ptr);
-                                }
-                                continue;
-                            }
-
-                            let rc = *k_val(constants, c);
-                            if table.impl_table.fast_seti(b, rc) {
-                                if rc.is_collectable() {
-                                    lua_state.gc_barrier_back(gc_ptr);
-                                }
-                                continue;
-                            }
-
-                            let delta = table.impl_table.set_int_slow(b, rc);
-                            if delta != 0 {
-                                lua_state.gc_track_table_resize(table_ptr, delta);
-                            }
-                            if rc.is_collectable() {
-                                lua_state.gc_barrier_back(gc_ptr);
-                            }
-                            continue;
-                        } else {
-                            let rc = if instr.get_k() {
-                                *k_val(constants, c)
-                            } else {
-                                base_stk.offset(c as usize).get()
-                            };
-                            if table.impl_table.set_existing_int(b, rc) {
-                                if rc.is_collectable() {
-                                    lua_state.gc_barrier_back(gc_ptr);
-                                }
-                                continue;
-                            }
-                            // Fall through to finishset fallback (known miss)
-                            let rb = LuaValue::integer(b);
-                            savestate!();
-                            if call_newindex_tm_fast(lua_state, ci, ra.get(), meta, rb, rc)? {
-                                syncbase!();
-                                updatetrap!();
-                                continue;
-                            }
-                            finishset_fallback(lua_state, ci, ra.get_ref(), &rb, rc, true)?;
-                            syncbase!();
-                            updatetrap!();
-                            continue;
-                        }
-                    }
-                    let rc = if instr.get_k() {
-                        *k_val(constants, c)
-                    } else {
-                        base_stk.offset(c as usize).get()
-                    };
-                    let rb = LuaValue::integer(b);
-                    savestate!();
-                    finishset_fallback(lua_state, ci, ra.get_ref(), &rb, rc, false)?;
-                    syncbase!();
-                    updatetrap!();
+                    table_ops::op_set_i(
+                        lua_state,
+                        ci,
+                        &mut base_stk,
+                        &mut pc,
+                        &mut trap,
+                        instr,
+                        constants,
+                    )?;
+                    continue;
                 }
                 OpCode::SetField => {
-                    // SETFIELD: R[A][K[B]:string] := RK(C)
-                    let a = instr.get_a();
-                    let b = instr.get_b();
-                    let c = instr.get_c();
-                    let ra = base_stk.offset(a as usize);
-                    let key = k_val(constants, b);
-                    debug_assert!(
-                        key.is_short_string(),
-                        "SetField key must be short string for fast path"
-                    );
-                    let mut known_newindex_miss = false;
-                    let mut meta = TablePtr::null();
-                    if ra.is_table() {
-                        let table = ra.hvalue_mut();
-                        meta = table.meta_ptr();
-                        if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
-                            let (new_key, delta, is_collectable) = if instr.get_k() {
-                                let rc = *k_val(constants, c);
-                                let pset_result = table.impl_table.pset_shortstr(key, rc);
-                                let (new_key, delta) =
-                                    table.impl_table.finish_shortstr_set(key, rc, pset_result);
-                                (new_key, delta, rc.is_collectable())
-                            } else {
-                                let rc = base_stk.offset(c as usize);
-                                let pset_result = table.impl_table.pset_shortstr(key, rc.get());
-                                let (new_key, delta) = table.impl_table.finish_shortstr_set(
-                                    key,
-                                    rc.get(),
-                                    pset_result,
-                                );
-                                (new_key, delta, rc.is_collectable())
-                            };
-                            if new_key {
-                                table.invalidate_tm_cache();
-                            }
-                            if delta != 0 {
-                                lua_state.gc_track_table_resize(ra.as_table_ptr(), delta);
-                            }
-                            if is_collectable {
-                                lua_state.gc_barrier_back(ra.as_gc_ptr());
-                            }
-                            continue;
-                        } else {
-                            let rc = if instr.get_k() {
-                                *k_val(constants, c)
-                            } else {
-                                base_stk.offset(c as usize).get()
-                            };
-                            if table.impl_table.set_existing_shortstr(key, rc) {
-                                if rc.is_collectable() {
-                                    lua_state.gc_barrier_back(ra.as_gc_ptr());
-                                }
-                                continue;
-                            }
-                            known_newindex_miss = true;
-                        }
-                    }
-                    let rc = if instr.get_k() {
-                        *k_val(constants, c)
-                    } else {
-                        base_stk.offset(c as usize).get()
-                    };
-                    savestate!();
-                    if known_newindex_miss {
-                        if call_newindex_tm_fast(lua_state, ci, ra.get(), meta, *key, rc)? {
-                            syncbase!();
-                            updatetrap!();
-                            continue;
-                        }
-                        finishset_fallback(lua_state, ci, ra.get_ref(), key, rc, true)?;
-                    } else {
-                        finishset_fallback(lua_state, ci, ra.get_ref(), key, rc, false)?;
-                    }
-                    syncbase!();
-                    updatetrap!();
+                    table_ops::op_set_field(
+                        lua_state,
+                        ci,
+                        &mut base_stk,
+                        &mut pc,
+                        &mut trap,
+                        instr,
+                        constants,
+                    )?;
+                    continue;
                 }
                 OpCode::NewTable => {
-                    // R[A] := {} (new table) — table ops should be inlined
-                    let a = instr.get_a();
-                    let mut vb = instr.get_vb();
-                    let mut vc = instr.get_vc();
-                    let k = instr.get_k();
-
-                    vb = if vb > 0 {
-                        if vb > 31 { 0 } else { 1 << (vb - 1) }
-                    } else {
-                        0
-                    };
-
-                    if k {
-                        let extra_instr = instr_at(code, pc);
-                        if extra_instr.get_opcode() == OpCode::ExtraArg {
-                            vc += extra_instr.get_ax() * 1024;
-                        }
-                    }
-
-                    pc += 1; // skip EXTRAARG
-
-                    let value = lua_state.create_table(vc as usize, vb as usize)?;
-                    base_stk.offset(a as usize).write(&value);
-
-                    let new_top = ci.base + a as usize + 1;
-                    lua_state.check_gc_in_loop(pc, new_top, &mut trap);
-                    syncbase!();
+                    table_ops::op_new_table(
+                        lua_state,
+                        ci,
+                        &mut base_stk,
+                        &mut pc,
+                        &mut trap,
+                        instr,
+                        code,
+                    )?;
                 }
                 OpCode::Self_ => {
-                    // SELF: R[A+1] := R[B]; R[A] := R[B][K[C]:string]
-                    let a = instr.get_a();
-                    let rb = base_stk.offset(instr.get_b() as usize).get();
-                    let key = k_val(constants, instr.get_c());
-
-                    debug_assert!(
-                        key.is_short_string(),
-                        "Self key must be short string for fast path"
-                    );
-                    base_stk.offset(a as usize + 1).write(&rb);
-                    // Fast path: rb is a table with hash part
-                    if rb.ttistable() {
-                        let table = rb.hvalue();
-                        if table.impl_table.has_hash() {
-                            let dest = base_stk.offset(a as usize);
-                            if table.impl_table.get_shortstr_into(key, dest.as_ptr()) {
-                                continue;
-                            }
-                        }
-                        if self_shortstr_index_chain_fast(
-                            lua_state,
-                            &rb,
-                            key,
-                            base_stk.offset(a as usize),
-                        ) {
-                            syncbase!();
-                            updatetrap!();
-                            continue;
-                        }
-                    }
-
-                    savestate!();
-                    finishget_fallback(lua_state, ci, &rb, key, base_stk.offset(a as usize))?;
-                    syncbase!();
-                    updatetrap!();
+                    table_ops::op_self(
+                        lua_state,
+                        ci,
+                        &mut base_stk,
+                        &mut pc,
+                        &mut trap,
+                        instr,
+                        constants,
+                    )?;
+                    continue;
                 }
                 OpCode::Add => {
                     // R[A] := R[B] + R[C]
@@ -2206,51 +1675,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // else: exit loop (control variable is nil)
                 }
                 OpCode::SetList => {
-                    let a = instr.get_a();
-                    let mut n = instr.get_vb() as usize;
-                    let stack_idx = instr.get_vc() as usize;
-                    let mut last = stack_idx;
-                    let a_pos = ci.base + a as usize;
-                    if n == 0 {
-                        n = lua_state.get_top() - a_pos - 1; // adjust n based on top if vb=0
-                    } else {
-                        lua_state.set_top_raw(ci.top as usize);
-                    }
-                    last += n;
-                    if instr.get_k() {
-                        let next_instr = instr_at(code, pc);
-                        debug_assert!(next_instr.get_opcode() == OpCode::ExtraArg);
-                        pc += 1; // Consume EXTRAARG
-                        let extra = next_instr.get_ax() as usize;
-                        // Add extra to starting index
-                        last += extra * (1 << Instruction::SIZE_V_C);
-                    }
-                    let ra = base_stk.offset(a as usize).get();
-                    let h = ra.hvalue_mut();
-                    if last > h.impl_table.asize as usize {
-                        h.impl_table.resize_array(last as u32);
-                    }
-
-                    let impl_table = &mut h.impl_table;
-                    let stack_base = lua_state.stack().as_ptr();
-                    let mut is_collectable = false;
-                    // Port of C Lua's SETLIST loop (lvm.c):
-                    //   for (; n > 0; n--) { val = s2v(ra+n); obj2arr(h, last, val); last--; }
-                    // Reads n values from stack[ra+n..ra+1], writes to table[last..last-n+1]
-                    let mut write_idx = last;
-                    for i in (1..=n).rev() {
-                        let val = unsafe { *stack_base.add(a_pos + i) };
-                        if val.iscollectable() {
-                            is_collectable = true;
-                        }
-
-                        impl_table.write_array(write_idx as i64, val);
-                        write_idx -= 1;
-                    }
-
-                    if is_collectable {
-                        lua_state.gc_barrier_back(ra.as_gc_ptr_unchecked());
-                    }
+                    table_ops::op_set_list(
+                        lua_state,
+                        ci,
+                        &mut base_stk,
+                        &mut pc,
+                        &mut trap,
+                        instr,
+                        code,
+                    )?;
                 }
                 OpCode::Closure => {
                     let a = instr.get_a() as usize;
