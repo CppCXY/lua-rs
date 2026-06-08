@@ -384,10 +384,12 @@ impl NativeTable {
     /// Performs at most one chain walk and reports whether the operation fully
     /// completed on the fast path or must be finished through a C-Lua-like
     /// encoded continuation.
+    #[inline(always)]
     pub fn pset_shortstr(&mut self, key: &LuaValue, value: LuaValue) -> ShortStrSetResult {
         self.pset_shortstr_parts(key, value.value, value.tt)
     }
 
+    #[inline(always)]
     pub(crate) fn pset_shortstr_parts(
         &mut self,
         key: &LuaValue,
@@ -515,6 +517,7 @@ impl NativeTable {
         ((node as usize) - (self.node as usize)) / std::mem::size_of::<Node>()
     }
 
+    #[inline(always)]
     pub fn finish_shortstr_set(
         &mut self,
         key: &LuaValue,
