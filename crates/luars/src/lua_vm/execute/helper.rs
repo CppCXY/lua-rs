@@ -185,9 +185,9 @@ fn tointeger_mode(v: &LuaValue, mode: i32) -> Option<i64> {
     } else if v.is_string() {
         let result = parse_lua_number(v.as_str().unwrap_or(""));
         if result.is_float() {
-            unsafe { result.value.n }
+            result.fltvalue()
         } else if result.is_integer() {
-            return Some(unsafe { result.value.i });
+            return Some(result.ivalue());
         } else {
             return None;
         }

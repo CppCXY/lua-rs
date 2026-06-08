@@ -16,6 +16,7 @@
 
 use crate::{
     Instruction, LuaResult, LuaState, LuaValue,
+    lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
     lua_vm::{LuaError, StkId, call_info::CallInfo, execute::helper::pk_val},
 };
 
@@ -264,37 +265,36 @@ pub(crate) fn op_bitwise_k(
 
 #[inline(always)]
 pub fn ptonumberns(v: StkId, out: &mut f64) -> bool {
-    if v.is_float() {
-        *out = v.fltvalue();
-        true
-    } else if v.is_integer() {
-        *out = v.ivalue() as f64;
-        true
-    } else {
-        false
+    match v.tt() {
+        LUA_VNUMFLT => {
+            *out = v.fltvalue();
+            true
+        }
+        LUA_VNUMINT => {
+            *out = v.ivalue() as f64;
+            true
+        }
+        _ => false,
     }
 }
 
 #[inline(always)]
 pub fn ptointegerns(v: StkId, out: &mut i64) -> bool {
-    if v.is_integer() {
-        *out = v.ivalue();
-        true
-    } else if v.is_float() {
-        // Try converting integral-valued floats (e.g. 5.0 -> 5)
-        // Range check matches C Lua's lua_numbertointeger:
-        //   f >= (i64::MIN as f64) && f < -(i64::MIN as f64)
-        // Note: i64::MAX as f64 rounds UP to 2^63, so we must use strict <
-        // with -(i64::MIN as f64) = 2^63 (exactly representable).
-        let f = v.fltvalue();
-        if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
-            *out = f as i64;
+    match v.tt() {
+        LUA_VNUMINT => {
+            *out = v.ivalue();
             true
-        } else {
-            false
         }
-    } else {
-        false
+        LUA_VNUMFLT => {
+            let f = v.fltvalue();
+            if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
+                *out = f as i64;
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
     }
 }
 
