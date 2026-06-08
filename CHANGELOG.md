@@ -1,5 +1,10 @@
 
-# 0.24.0 -- Unreleased
+# 0.26.0
+
+refactor many internal struct, reduce many unsafe and optimize performance.
+
+
+# 0.24.0 
 
 ## Userdata Sub-Reference System
 
