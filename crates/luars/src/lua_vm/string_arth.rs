@@ -6,7 +6,7 @@
 
 use crate::{
     LuaResult, LuaState, LuaValue,
-    lua_vm::{TmKind, execute, execute::helper::luai_numpow},
+    lua_vm::{TmKind, execute, execute::arith::luai_numpow},
     stdlib::basic::parse_number::parse_lua_number,
 };
 

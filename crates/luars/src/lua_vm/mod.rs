@@ -54,7 +54,7 @@ use crate::platform_time::{PlatformInstant, unix_nanos};
 use crate::stdlib::Stdlib;
 use crate::{LuaEnum, LuaRegistrable, OpaqueUserData, RustCallback, lib_registry};
 pub use execute::TmKind;
-pub(crate) use execute::helper::{lua_shiftl, luai_numpow};
+pub(crate) use execute::arith::{lua_shiftl, luai_numpow};
 pub use execute::{get_metamethod_event, get_metatable};
 pub use lua_rng::LuaRng;
 pub use opcode::{Instruction, OpCode};

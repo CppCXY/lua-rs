@@ -26,15 +26,14 @@ use crate::{
         LuaError, StkId, TmKind,
         call_info::call_status::{CIST_C, CIST_CLSRET, CIST_PENDING_FINISH},
         execute::{
-            arith,
+            arith::{self, lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr, luai_numpow},
             call::{poscall, precall, pretailcall},
             closure::push_closure,
             concat::{concat, try_concat_pair_utf8},
             helper::{
                 bin_tm_fallback, eq_fallback, error_div_by_zero, error_global, error_mod_by_zero,
                 float_for_loop, fltvalue, forprep, handle_pending_ops, instr_at, ivalue, k_val,
-                lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr, luai_numpow, objlen,
-                order_tm_fallback, pivalue, pk_val, pttisinteger, return0_with_hook,
+                objlen, order_tm_fallback, pivalue, pk_val, pttisinteger, return0_with_hook,
                 return1_with_hook, tointegerns, tonumberns, ttisfloat, ttisinteger, ttisstring,
                 unary_tm_fallback,
             },
@@ -430,7 +429,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::Add => {
                     arith::op_arith(
-                        &mut base_stk,
+                        base_stk,
                         &mut pc,
                         instr,
                         |i1, i2| i1.wrapping_add(i2),
@@ -439,7 +438,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::AddI => {
                     arith::op_arith_i(
-                        &mut base_stk,
+                        base_stk,
                         &mut pc,
                         instr,
                         |iv1, sc| iv1.wrapping_add(sc as i64),
@@ -448,7 +447,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::Sub => {
                     arith::op_arith(
-                        &mut base_stk,
+                        base_stk,
                         &mut pc,
                         instr,
                         |i1, i2| i1.wrapping_sub(i2),
@@ -457,7 +456,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::Mul => {
                     arith::op_arith(
-                        &mut base_stk,
+                        base_stk,
                         &mut pc,
                         instr,
                         |i1, i2| i1.wrapping_mul(i2),
@@ -465,16 +464,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     );
                 }
                 OpCode::Div => {
-                    arith::op_arithf(&mut base_stk, &mut pc, instr, |n1, n2| n1 / n2);
+                    arith::op_arithf(base_stk, &mut pc, instr, |n1, n2| n1 / n2);
                 }
                 OpCode::IDiv => {
                     arith::op_arith_check_zero(
                         lua_state,
                         ci,
-                        &mut base_stk,
+                        base_stk,
                         &mut pc,
                         instr,
-                        |i1, i2| lua_idiv(i1, i2),
+                        lua_idiv,
                         |n1, n2| (n1 / n2).floor(),
                         error_div_by_zero,
                     )?;
@@ -483,20 +482,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     arith::op_arith_check_zero(
                         lua_state,
                         ci,
-                        &mut base_stk,
+                        base_stk,
                         &mut pc,
                         instr,
-                        |i1, i2| lua_imod(i1, i2),
-                        |n1, n2| lua_fmod(n1, n2),
+                        lua_imod,
+                        lua_fmod,
                         error_mod_by_zero,
                     )?;
                 }
                 OpCode::Pow => {
-                    arith::op_arithf(&mut base_stk, &mut pc, instr, |n1, n2| luai_numpow(n1, n2));
+                    arith::op_arithf(base_stk, &mut pc, instr, luai_numpow);
                 }
                 OpCode::AddK => {
                     arith::op_arith_k(
-                        &mut base_stk,
+                        base_stk,
                         &mut pc,
                         instr,
                         constants,
@@ -506,7 +505,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::SubK => {
                     arith::op_arith_k(
-                        &mut base_stk,
+                        base_stk,
                         &mut pc,
                         instr,
                         constants,
@@ -516,7 +515,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::MulK => {
                     arith::op_arith_k(
-                        &mut base_stk,
+                        base_stk,
                         &mut pc,
                         instr,
                         constants,
@@ -528,59 +527,59 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     arith::op_arithk_check_zero(
                         lua_state,
                         ci,
-                        &mut base_stk,
+                        base_stk,
                         &mut pc,
                         instr,
                         constants,
-                        |i1, i2| lua_imod(i1, i2),
-                        |n1, n2| lua_fmod(n1, n2),
+                        lua_imod,
+                        lua_fmod,
                         error_mod_by_zero,
                     )?;
                 }
                 OpCode::PowK => {
-                    arith::op_arithf_k(&mut base_stk, &mut pc, instr, constants, |n1, n2| {
+                    arith::op_arithf_k(base_stk, &mut pc, instr, constants, |n1, n2| {
                         luai_numpow(n1, n2)
                     });
                 }
                 OpCode::DivK => {
-                    arith::op_arithf_k(&mut base_stk, &mut pc, instr, constants, |n1, n2| n1 / n2);
+                    arith::op_arithf_k(base_stk, &mut pc, instr, constants, |n1, n2| n1 / n2);
                 }
                 OpCode::IDivK => {
                     arith::op_arithk_check_zero(
                         lua_state,
                         ci,
-                        &mut base_stk,
+                        base_stk,
                         &mut pc,
                         instr,
                         constants,
-                        |i1, i2| lua_idiv(i1, i2),
+                        lua_idiv,
                         |n1, n2| (n1 / n2).floor(),
                         error_div_by_zero,
                     )?;
                 }
                 OpCode::BAndK => {
-                    arith::op_bitwise_k(&mut base_stk, &mut pc, instr, constants, |i1, i2| i1 & i2);
+                    arith::op_bitwise_k(base_stk, &mut pc, instr, constants, |i1, i2| i1 & i2);
                 }
                 OpCode::BOrK => {
-                    arith::op_bitwise_k(&mut base_stk, &mut pc, instr, constants, |i1, i2| i1 | i2);
+                    arith::op_bitwise_k(base_stk, &mut pc, instr, constants, |i1, i2| i1 | i2);
                 }
                 OpCode::BXorK => {
-                    arith::op_bitwise_k(&mut base_stk, &mut pc, instr, constants, |i1, i2| i1 ^ i2);
+                    arith::op_bitwise_k(base_stk, &mut pc, instr, constants, |i1, i2| i1 ^ i2);
                 }
                 OpCode::BAnd => {
-                    arith::op_bitwise(&mut base_stk, &mut pc, instr, |i1, i2| i1 & i2);
+                    arith::op_bitwise(base_stk, &mut pc, instr, |i1, i2| i1 & i2);
                 }
                 OpCode::BOr => {
-                    arith::op_bitwise(&mut base_stk, &mut pc, instr, |i1, i2| i1 | i2);
+                    arith::op_bitwise(base_stk, &mut pc, instr, |i1, i2| i1 | i2);
                 }
                 OpCode::BXor => {
-                    arith::op_bitwise(&mut base_stk, &mut pc, instr, |i1, i2| i1 ^ i2);
+                    arith::op_bitwise(base_stk, &mut pc, instr, |i1, i2| i1 ^ i2);
                 }
                 OpCode::Shl => {
-                    arith::op_bitwise(&mut base_stk, &mut pc, instr, |i1, i2| lua_shiftl(i1, i2));
+                    arith::op_bitwise(base_stk, &mut pc, instr, lua_shiftl);
                 }
                 OpCode::Shr => {
-                    arith::op_bitwise(&mut base_stk, &mut pc, instr, |i1, i2| lua_shiftr(i1, i2));
+                    arith::op_bitwise(base_stk, &mut pc, instr, lua_shiftr);
                 }
                 OpCode::ShlI => {
                     // R[A] := sC << R[B]

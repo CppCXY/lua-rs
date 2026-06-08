@@ -96,12 +96,6 @@ pub fn ttisinteger(v: &LuaValue) -> bool {
     v.ttisinteger()
 }
 
-/// ttisfloat - 检查是否是浮点数
-#[inline(always)]
-pub unsafe fn pttisfloat(v: *const LuaValue) -> bool {
-    unsafe { (*v).ttisfloat() }
-}
-
 /// ttisfloat_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn ttisfloat(v: &LuaValue) -> bool {
@@ -134,12 +128,6 @@ pub fn chgivalue(v: &mut LuaValue, i: i64) {
     v.value.i = i;
 }
 
-/// fltvalue - 直接获取浮点值 (调用前必须用 ttisfloat 检查)
-#[inline(always)]
-pub unsafe fn pfltvalue(v: *const LuaValue) -> f64 {
-    unsafe { (*v).fltvalue() }
-}
-
 /// fltvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn fltvalue(v: &LuaValue) -> f64 {
@@ -156,31 +144,6 @@ pub fn chgfltvalue(v: &mut LuaValue, n: f64) {
 pub fn setivalue(v: &mut LuaValue, i: i64) {
     v.tt = LUA_VNUMINT;
     v.value.i = i;
-}
-
-/// luai_numpow - Power operation matching Lua 5.5's luai_numpow macro:
-///   #define luai_numpow(L,a,b)  ((b)==2 ? (a)*(a) : pow(a,b))
-#[inline(always)]
-pub fn luai_numpow(a: f64, b: f64) -> f64 {
-    if b == 2.0 {
-        a * a
-    } else if a.fract() == 0.0 && b.fract() == 0.0 && b >= 0.0 && b <= u64::MAX as f64 {
-        let mut base = a;
-        let mut exp = b as u64;
-        let mut result = 1.0;
-        while exp != 0 {
-            if exp & 1 == 1 {
-                result *= base;
-            }
-            exp >>= 1;
-            if exp != 0 {
-                base *= base;
-            }
-        }
-        result
-    } else {
-        a.powf(b)
-    }
 }
 
 /// setfltvalue_ref - 引用版本（保留兼容性）
@@ -205,82 +168,6 @@ pub fn setobjs2s(l: &mut LuaState, a: usize, b: usize) {
         *stack.get_unchecked_mut(a) = *stack.get_unchecked(b);
     }
 }
-
-/// luaV_shiftl - Shift integer x left by y positions.
-/// If y is negative, shifts right (LOGICAL/unsigned shift).
-/// Matches Lua 5.5's luaV_shiftl from lvm.c.
-#[inline(always)]
-pub fn lua_shiftl(x: i64, y: i64) -> i64 {
-    if y < 0 {
-        // Right shift (logical/unsigned)
-        if y <= -64 {
-            0
-        } else {
-            ((x as u64) >> ((-y) as u32)) as i64
-        }
-    } else {
-        // Left shift
-        if y >= 64 {
-            0
-        } else {
-            ((x as u64) << (y as u32)) as i64
-        }
-    }
-}
-
-/// luaV_shiftr - Shift integer x right by y positions.
-/// luaV_shiftr(x, y) = luaV_shiftl(x, -y)
-#[inline(always)]
-pub fn lua_shiftr(x: i64, y: i64) -> i64 {
-    lua_shiftl(x, y.wrapping_neg())
-}
-
-/// Lua floor division for integers: a // b
-/// Equivalent to luaV_idiv in Lua 5.5
-#[inline(always)]
-pub fn lua_idiv(a: i64, b: i64) -> i64 {
-    // Handle overflow case: MIN_INT / -1 would overflow, wrapping gives MIN_INT (floor division same result)
-    if b == -1 {
-        return a.wrapping_neg();
-    }
-    let q = a / b;
-    // If the signs of a and b differ and there is a remainder,
-    // subtract 1 to achieve floor division (toward -infinity)
-    if (a ^ b) < 0 && a % b != 0 {
-        q.wrapping_sub(1)
-    } else {
-        q
-    }
-}
-
-/// Lua modulo for integers: a % b
-/// Equivalent to luaV_mod in Lua 5.5: m = a % b; if m != 0 && (m ^ b) < 0 then m += b
-#[inline(always)]
-pub fn lua_imod(a: i64, b: i64) -> i64 {
-    // Handle overflow case: MIN_INT % -1 = 0
-    if b == -1 {
-        return 0;
-    }
-    let m = a % b;
-    if m != 0 && (m ^ b) < 0 {
-        m.wrapping_add(b)
-    } else {
-        m
-    }
-}
-
-/// Float modulo matching C Lua's `luai_nummod`.
-/// Uses hardware fmod (Rust's `%` operator on f64) then adjusts sign.
-#[inline(always)]
-pub fn lua_fmod(a: f64, b: f64) -> f64 {
-    let mut m = a % b; // C fmod
-    if m != 0.0 && ((m > 0.0) != (b > 0.0)) {
-        m += b;
-    }
-    m
-}
-
-// ============ 类型转换辅助函数 ============
 
 /// tointegerns_ref - 引用版本（保留兼容性）
 #[inline(always)]
@@ -323,23 +210,6 @@ pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
         }
     }
     false
-}
-
-/// ptonumberns - 尝试转换为浮点数 (不抛出错误)
-/// Only handles float and integer (NO string coercion).
-#[inline(always)]
-pub unsafe fn ptonumberns(v: *const LuaValue, out: *mut f64) -> bool {
-    unsafe {
-        if pttisfloat(v) {
-            *out = pfltvalue(v);
-            true
-        } else if pttisinteger(v) {
-            *out = pivalue(v) as f64;
-            true
-        } else {
-            false
-        }
-    }
 }
 
 /// tonumberns - 引用版本
