@@ -4,9 +4,10 @@
 use crate::compiler::format_source;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaProto, LuaValue};
+use crate::lua_vm::call_info::call_status;
 use crate::lua_vm::opcode::OpCode;
-use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metatable};
-use crate::{Instruction, LUA_MASKCALL, LUA_MASKLINE, LUA_MASKRET};
+use crate::lua_vm::{LuaError, LuaResult, LuaState, TmKind, get_metatable};
+use crate::{Instruction, LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET, lib_module};
 
 /// Get the type name of an object, checking __name in metatable first.
 /// Mirrors C Lua's luaT_objtypename.
@@ -315,7 +316,6 @@ fn funcnamefromcode(chunk: &LuaProto, pc: usize) -> Option<(&'static str, String
             Some(("metamethod", "newindex".to_string()))
         }
         OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK => {
-            use crate::lua_vm::TmKind;
             let tm = TmKind::from_u8(i.get_c() as u8);
             let name: &str = tm.name();
             Some(("metamethod", name[2..].to_string()))
@@ -347,7 +347,7 @@ fn getfuncname(l: &LuaState, ci_frame_idx: usize) -> Option<(&'static str, Strin
     // Look at the immediately previous frame (the caller)
     let prev_idx = ci_frame_idx - 1;
     let prev = l.get_frame(prev_idx)?;
-    if prev.call_status & crate::lua_vm::call_info::call_status::CIST_HOOKED != 0 {
+    if prev.call_status & call_status::CIST_HOOKED != 0 {
         return Some(("hook", "?".to_string()));
     }
     if prev.is_lua() {
@@ -672,7 +672,7 @@ pub fn opinterror(
 }
 
 /// Generate a comparison error (mirrors luaG_ordererror).
-pub fn ordererror(l: &mut LuaState, p1: &crate::LuaValue, p2: &crate::LuaValue) -> LuaError {
+pub fn ordererror(l: &mut LuaState, p1: &LuaValue, p2: &LuaValue) -> LuaError {
     let t1 = objtypename(l, p1);
     let t2 = objtypename(l, p2);
     if t1 == t2 {
@@ -684,7 +684,7 @@ pub fn ordererror(l: &mut LuaState, p1: &crate::LuaValue, p2: &crate::LuaValue) 
 
 /// Generate a call error with function name info (mirrors luaG_callerror).
 /// Used when attempting to call a non-callable value.
-pub fn callerror(l: &mut LuaState, val: &crate::LuaValue) -> LuaError {
+pub fn callerror(l: &mut LuaState, val: &LuaValue) -> LuaError {
     // Look at the current frame's instruction to determine what was being called
     let ci_idx = l.call_depth().wrapping_sub(1);
     if let Some(ci) = l.get_frame(ci_idx)
@@ -714,7 +714,7 @@ pub fn pub_getfuncname(l: &LuaState, ci_frame_idx: usize) -> Option<(&'static st
 }
 
 pub fn create_debug_lib() -> LibraryModule {
-    let mut module = crate::lib_module!("debug", {
+    let mut module = lib_module!("debug", {
         "traceback" => debug_traceback,
         "getinfo" => debug_getinfo,
         "getmetatable" => debug_getmetatable,
@@ -1203,9 +1203,9 @@ fn debug_sethook(l: &mut LuaState) -> LuaResult<usize> {
     {
         for ch in s.chars() {
             match ch {
-                'c' => mask |= crate::lua_vm::LUA_MASKCALL,
-                'r' => mask |= crate::lua_vm::LUA_MASKRET,
-                'l' => mask |= crate::lua_vm::LUA_MASKLINE,
+                'c' => mask |= LUA_MASKCALL,
+                'r' => mask |= LUA_MASKRET,
+                'l' => mask |= LUA_MASKLINE,
                 _ => {} // ignore unknown characters
             }
         }
@@ -1214,7 +1214,7 @@ fn debug_sethook(l: &mut LuaState) -> LuaResult<usize> {
     // Parse count
     let count = count_val.and_then(|v| v.as_integer()).unwrap_or(0) as i32;
     if count > 0 {
-        mask |= crate::lua_vm::LUA_MASKCOUNT;
+        mask |= LUA_MASKCOUNT;
     }
 
     // If hook is nil, clear everything

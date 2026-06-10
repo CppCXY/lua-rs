@@ -41,6 +41,9 @@ mod paged_pool;
 mod string_interner;
 mod table_allocator;
 
+#[cfg(debug_assertions)]
+use std::collections::HashMap;
+
 use crate::{
     LuaRawTable, LuaResult,
     lua_value::LuaValue,
@@ -3458,7 +3461,7 @@ impl GC {
     #[cfg(debug_assertions)]
     fn validate_not_on_stack(
         gc_owner: &GcObjectOwner,
-        stack_ptrs: &std::collections::HashMap<u64, (String, usize, usize, u8)>,
+        stack_ptrs: &HashMap<u64, (String, usize, usize, u8)>,
         old_list: &GcList,
     ) {
         let raw_ptr = match gc_owner {
