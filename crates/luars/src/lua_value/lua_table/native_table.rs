@@ -265,6 +265,7 @@ impl NativeTable {
     /// Zero-copy short string lookup — writes directly to destination pointer.
     /// Assumes hash is non-empty and key is short string.
     /// Returns true if found and written.
+    #[inline(never)]
     pub(crate) fn get_shortstr_into(&self, key: &LuaValue, dest: *mut LuaValue) -> bool {
         let mut node = self.mainposition_string(key);
         let key_ptr = key.string_ptr_raw();
@@ -384,7 +385,7 @@ impl NativeTable {
     /// Performs at most one chain walk and reports whether the operation fully
     /// completed on the fast path or must be finished through a C-Lua-like
     /// encoded continuation.
-    #[inline(always)]
+    #[inline(never)]
     pub fn pset_shortstr(&mut self, key: &LuaValue, value: LuaValue) -> ShortStrSetResult {
         self.pset_shortstr_parts(key, value.value, value.tt)
     }
@@ -517,7 +518,7 @@ impl NativeTable {
         ((node as usize) - (self.node as usize)) / std::mem::size_of::<Node>()
     }
 
-    #[inline(always)]
+    #[inline(never)]
     pub fn finish_shortstr_set(
         &mut self,
         key: &LuaValue,
@@ -1259,6 +1260,7 @@ impl NativeTable {
     /// Handles resize/push and hash fallback.
     /// Returns memory delta from resize operations.
     /// NOT inlined: contains resize_array + migrate + set_node cold paths.
+    #[inline(never)]
     pub fn set_int_slow(&mut self, key: i64, value: LuaValue) -> isize {
         // Key outside array range: push optimization for sequential insertion
         if key >= 1 && !value.is_nil() {
@@ -1330,7 +1332,7 @@ impl NativeTable {
     /// Public so metatable TM lookups can bypass raw_get's float normalization.
     /// OPTIMIZED: Reduced branches in hot loop, pointer-equality for interned strings.
     /// Safe to call on empty hash tables (returns None).
-    #[inline(always)]
+    #[inline(never)]
     pub fn get_shortstr_fast(&self, key: &LuaValue) -> Option<LuaValue> {
         if self.node.is_null() {
             return None;
