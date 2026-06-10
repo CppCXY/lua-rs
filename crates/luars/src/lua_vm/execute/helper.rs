@@ -1507,60 +1507,17 @@ pub fn return1_with_hook(lua_state: &mut LuaState, a_pos: usize, pc: usize) -> L
     poscall(lua_state, 1, pc)
 }
 
-pub trait VmIndex {
-    fn to_usize(self) -> usize;
-}
-
-impl VmIndex for usize {
-    #[inline(always)]
-    fn to_usize(self) -> usize {
-        self
-    }
-}
-
-impl VmIndex for u8 {
-    #[inline(always)]
-    fn to_usize(self) -> usize {
-        self as usize
-    }
-}
-
-impl VmIndex for u16 {
-    #[inline(always)]
-    fn to_usize(self) -> usize {
-        self as usize
-    }
-}
-
-impl VmIndex for u32 {
-    #[inline(always)]
-    fn to_usize(self) -> usize {
-        self as usize
-    }
-}
-
-impl VmIndex for i32 {
-    #[inline(always)]
-    fn to_usize(self) -> usize {
-        self as usize
-    }
-}
-
 #[inline(always)]
 pub fn instr_at(code: &[Instruction], pc: usize) -> Instruction {
     unsafe { *code.get_unchecked(pc) }
 }
 
 #[inline(always)]
-pub fn const_ref<I: VmIndex>(constants: &[LuaValue], index: I) -> &LuaValue {
-    unsafe { constants.get_unchecked(index.to_usize()) }
+pub fn k_val(constants: &[LuaValue], index: u32) -> &LuaValue {
+    unsafe { constants.get_unchecked(index as usize) }
 }
 
 #[inline(always)]
-pub fn k_val<I: VmIndex>(constants: &[LuaValue], index: I) -> &LuaValue {
-    const_ref(constants, index)
-}
-
 pub fn pk_val(constants: &[LuaValue], index: usize) -> StkId {
-    StkId::from_const_ptr(const_ref(constants, index) as *const LuaValue)
+    StkId::from_const_ptr(unsafe { constants.get_unchecked(index) } as *const LuaValue)
 }
