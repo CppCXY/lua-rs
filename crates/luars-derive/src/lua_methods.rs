@@ -55,7 +55,9 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, ItemImpl, Pat, ReturnType, parse_macro_input};
 
-use crate::type_utils::{WrapperKind, normalize_type, strip_reference, unwrap_outer_type};
+use crate::type_utils::{
+    WrapperKind, is_string_like_type, normalize_type, strip_reference, unwrap_outer_type,
+};
 
 /// Kind of method discovered in the impl block.
 enum MethodKind {
@@ -81,22 +83,30 @@ enum SubRefReturnKind {
 }
 
 /// Check whether a return type (normalized) should be sub-ref-wrapped.
+///
+/// String-like types (`str`, `String`) are excluded — they represent Lua
+/// strings and should go through `IntoLua`/`FromLua` conversions, not
+/// userdata sub-reference wrapping.
 fn classify_subref_return(normalized: &str) -> Option<SubRefReturnKind> {
     // Direct reference: &T or &mut T
-    if strip_reference(normalized).is_some() {
+    if let Some((inner, _)) = strip_reference(normalized)
+        && !is_string_like_type(inner)
+    {
         return Some(SubRefReturnKind::DirectRef);
     }
 
     // Option<&T> or Option<&mut T>
     if let Some((inner, WrapperKind::Option)) = unwrap_outer_type(normalized)
-        && strip_reference(inner).is_some()
+        && let Some((inner_ty, _)) = strip_reference(inner)
+        && !is_string_like_type(inner_ty)
     {
         return Some(SubRefReturnKind::OptionRef);
     }
 
     // Result<&T, E> or Result<&mut T, E>
     if let Some((inner, WrapperKind::Result)) = unwrap_outer_type(normalized)
-        && strip_reference(inner).is_some()
+        && let Some((inner_ty, _)) = strip_reference(inner)
+        && !is_string_like_type(inner_ty)
     {
         return Some(SubRefReturnKind::ResultRef);
     }
@@ -456,6 +466,18 @@ fn gen_from_lua_extraction(
                     .map_err(|e| __l.error(format!("bad argument #{} '{}': {}", #arg_index, #param_name, e)))?
             };
             let #name: &str = &#storage_name;
+        }
+    } else if type_str == "&String" || type_str == "&'staticString" {
+        // &String — extract as String, then lend as &String.
+        // Treated like &str: String is not a userdata type.
+        let storage_name = format_ident!("__{}_storage", name);
+        quote! {
+            let #storage_name: String = {
+                let __v = __l.get_arg(#arg_index).unwrap_or(luars::LuaValue::nil());
+                <String as luars::FromLua>::from_lua(__v, __l)
+                    .map_err(|e| __l.error(format!("bad argument #{} '{}': {}", #arg_index, #param_name, e)))?
+            };
+            let #name: &String = &#storage_name;
         }
     } else if type_str.starts_with("&mut") {
         // &mut T → downcast userdata mutably

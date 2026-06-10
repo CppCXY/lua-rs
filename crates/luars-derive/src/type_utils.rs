@@ -42,6 +42,34 @@ pub fn is_primitive_type(normalized: &str) -> bool {
     )
 }
 
+/// Check whether a normalized type is a string-like type.
+///
+/// `str` and `String` should never be treated as userdata — they
+/// represent Lua strings and should go through `IntoLua`/`FromLua`
+/// conversions instead of sub-reference wrapping.
+pub fn is_string_like_type(normalized: &str) -> bool {
+    matches!(normalized, "str" | "String")
+}
+
+/// Check whether a normalized type should use value semantics (copy/clone
+/// via `UdValue::from`) rather than userdata sub-reference wrapping.
+///
+/// Returns `true` for primitive types, string-like types, and their
+/// combinations with references / Option / Result wrappers.
+/// Returns `false` for types that should be treated as userdata.
+pub fn is_value_type(normalized: &str) -> bool {
+    if is_primitive_type(normalized) || is_string_like_type(normalized) {
+        return true;
+    }
+    if let Some((inner, _)) = strip_reference(normalized) {
+        return is_value_type(inner);
+    }
+    if let Some((inner, _)) = unwrap_outer_type(normalized) {
+        return is_value_type(inner);
+    }
+    false
+}
+
 /// Strip leading `&` or `&mut` and any lifetime from a reference type string.
 ///
 /// `"&'aCounter"` → `("Counter", "&")`, `"&mutCounter"` → `("Counter", "&mut")`.

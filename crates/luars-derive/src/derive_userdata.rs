@@ -25,7 +25,7 @@ use quote::quote;
 use syn::{Data, DeriveInput, Fields, GenericParam, Ident, Meta};
 
 use crate::type_utils::{
-    field_to_udvalue, is_primitive_type, is_ref_alive_token_type, normalize_type, ref_to_udvalue,
+    field_to_udvalue, is_ref_alive_token_type, is_value_type, normalize_type, ref_to_udvalue,
     udvalue_to_field,
 };
 
@@ -290,12 +290,14 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
         let lua_name = &f.lua_name;
         let type_str = normalize_type(&f.ty);
 
-        if is_primitive_type(&type_str) {
-            // Primitive: use value conversion (copy/clone)
+        if is_value_type(&type_str) {
+            // Primitive / string-like: use value conversion (copy/clone).
+            // Includes String, &str, Option<String>, etc. — anything that
+            // can convert to UdValue without requiring UserDataTrait.
             let conversion = field_to_udvalue(&f.ty, quote!(self.#ident));
             quote! { #lua_name => Some(#conversion), }
         } else {
-            // Non-primitive: return sub-ref marker — the VM will wrap with
+            // Userdata type: return sub-ref marker — the VM will wrap with
             // the parent userdata's sub_guard token.
             quote! {
                 #lua_name => Some(
@@ -313,11 +315,11 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
         let lua_name = &f.lua_name;
         let type_str = normalize_type(&f.ty);
 
-        if is_primitive_type(&type_str) {
+        if is_value_type(&type_str) {
             let assign = udvalue_to_field(&f.ty, quote!(self.#ident), lua_name);
             quote! { #lua_name => { #assign } }
         } else {
-            // Non-primitive: support setting via downcast + clone
+            // Userdata type: support setting via downcast + clone
             let ty = &f.ty;
             quote! {
                 #lua_name => {

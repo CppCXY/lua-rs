@@ -23,8 +23,6 @@
 //!     pub name: String,
 //!     pub pos: Position,
 //!
-//!     #[lua(skip)]
-//!     #[lua(ref)]
 //!     alive: RefAliveToken,  // enables &Entity → Lua conversion
 //! }
 //! ```
