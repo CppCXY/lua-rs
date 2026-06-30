@@ -21,7 +21,7 @@ use crate::{
     stdlib::{basic::lua_float_to_string, debug::typeerror},
 };
 
-#[inline(always)]
+#[inline]
 fn utf8_piece_len(v: &LuaValue) -> Option<usize> {
     if let Some(s) = v.as_str() {
         Some(s.len())
@@ -140,7 +140,7 @@ fn concat_utf8_run(lua_state: &mut LuaState, top: usize, total: usize) -> LuaRes
 
 /// Check whether a value can be converted to string for concat:
 /// strings and numbers (integer/float) are convertible.
-#[inline(always)]
+#[inline]
 fn cvt2str(v: &LuaValue) -> bool {
     v.ttisinteger() || v.ttisfloat()
 }
@@ -169,7 +169,7 @@ fn tostring_inplace(lua_state: &mut LuaState, idx: usize) -> LuaResult<bool> {
 }
 
 /// Check if value is a short empty string (optimization: skip empty operands).
-#[inline(always)]
+#[inline]
 fn isemptystr(v: &LuaValue) -> bool {
     v.is_short_string() && v.as_str().is_some_and(|s| s.is_empty())
 }

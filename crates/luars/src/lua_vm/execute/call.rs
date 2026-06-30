@@ -11,7 +11,7 @@ use crate::{
     },
 };
 
-#[inline(always)]
+#[inline]
 fn insert_callable_before_args(
     lua_state: &mut LuaState,
     func_idx: usize,
@@ -364,7 +364,7 @@ fn call_c_function_tailcall(
 ///
 /// `nargs` is passed in by the caller so the hot CALL path does not need to
 /// recompute it from `top - func_idx - 1`.
-#[inline(always)]
+#[inline]
 pub fn precall(
     lua_state: &mut LuaState,
     func_idx: usize,
@@ -604,7 +604,7 @@ pub fn poscall(lua_state: &mut LuaState, nres: usize, pc: usize) -> LuaResult<()
 /// Sets `top` after the last result.
 ///
 /// `wanted` semantics: -1 = LUA_MULTRET (return all), 0 = none, N = exactly N.
-#[inline(always)]
+#[inline]
 fn moveresults(lua_state: &mut LuaState, res: usize, nres: usize, wanted: i32) {
     let top = lua_state.get_top();
     match wanted {
@@ -637,7 +637,7 @@ fn moveresults(lua_state: &mut LuaState, res: usize, nres: usize, wanted: i32) {
 ///
 /// Generic case: copies min(nres, wanted) results from top-nres to res,
 /// then nil-fills if wanted > nres. Sets top = res + wanted.
-#[inline(always)]
+#[inline]
 fn genmoveresults(
     lua_state: &mut LuaState,
     res: usize,

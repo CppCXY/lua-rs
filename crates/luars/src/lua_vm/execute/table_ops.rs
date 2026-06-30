@@ -5,7 +5,7 @@
   operations from the main dispatch loop.
 
   Design:
-  1. Each opcode is an #[inline(always)] function that takes &mut
+  1. Each opcode is an #[inline] function that takes &mut
      references to shared VM state (base_stk, pc, trap).
   2. Functions return LuaResult<()> — the caller always does `continue`
      after a successful invocation.
@@ -13,7 +13,7 @@
      code since the functions have &mut access to all state.
   4. This mirrors Lua 5.5's C code organization (lvm.c delegates table
      access to ltable.c functions), while maintaining zero-overhead
-     inlining via #[inline(always)].
+     inlining via #[inline].
 ----------------------------------------------------------------------*/
 
 use crate::{
@@ -36,7 +36,7 @@ use crate::{
 
 /// GetTabUp: R[A] := UpValue[B][K[C]:shortstring]
 #[allow(clippy::too_many_arguments)]
-#[inline(always)]
+#[inline]
 pub(crate) fn op_get_tabup(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -109,7 +109,7 @@ pub(crate) fn op_get_tabup(
 }
 
 /// GetTable: R[A] := R[B][R[C]]
-#[inline(always)]
+#[inline]
 pub(crate) fn op_get_table(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -187,7 +187,7 @@ pub(crate) fn op_get_table(
 }
 
 /// GetI: R[A] := R[B][C] (integer key)
-#[inline(always)]
+#[inline]
 pub(crate) fn op_get_i(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -234,7 +234,7 @@ pub(crate) fn op_get_i(
 }
 
 /// GetField: R[A] := R[B][K[C]:string]
-#[inline(always)]
+#[inline]
 pub(crate) fn op_get_field(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -279,7 +279,7 @@ pub(crate) fn op_get_field(
 // ── SET operations ──────────────────────────────────────────────
 
 /// SetTabUp: UpValue[A][K[B]:shortstring] := RK(C)
-#[inline(always)]
+#[inline]
 pub(crate) fn op_set_tabup(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -385,7 +385,7 @@ pub(crate) fn op_set_tabup(
 }
 
 /// SetTable: R[A][R[B]] := RK(C)
-#[inline(always)]
+#[inline]
 pub(crate) fn op_set_table(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -595,7 +595,7 @@ pub(crate) fn op_set_table(
 }
 
 /// SetI: R[A][B] := RK(C) (integer key)
-#[inline(always)]
+#[inline]
 pub(crate) fn op_set_i(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -715,7 +715,7 @@ pub(crate) fn op_set_i(
 }
 
 /// SetField: R[A][K[B]:string] := RK(C)
-#[inline(always)]
+#[inline]
 pub(crate) fn op_set_field(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -818,7 +818,7 @@ pub(crate) fn op_set_field(
 // ── Table creation / bulk operations ────────────────────────────
 
 /// NewTable: R[A] := {} (create new table)
-#[inline(always)]
+#[inline]
 pub(crate) fn op_new_table(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -858,7 +858,7 @@ pub(crate) fn op_new_table(
 }
 
 /// Self_: R[A+1] := R[B]; R[A] := R[B][K[C]:string]
-#[inline(always)]
+#[inline]
 pub(crate) fn op_self(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -917,7 +917,7 @@ pub(crate) fn op_self(
 }
 
 /// SetList: R[A][(C-1)*FPF+i] := R(A+i), 1 <= i <= B
-#[inline(always)]
+#[inline]
 pub(crate) fn op_set_list(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,

@@ -45,7 +45,7 @@ use crate::{
     },
 };
 
-#[inline(always)]
+#[inline]
 fn init_oldpc(lua_state: &mut LuaState, pc: usize, chunk: &LuaProto) {
     if lua_state.hook_mask & LUA_MASKLINE != 0 {
         lua_state.oldpc = if pc > 0 {
@@ -58,7 +58,7 @@ fn init_oldpc(lua_state: &mut LuaState, pc: usize, chunk: &LuaProto) {
     }
 }
 
-#[inline(always)]
+#[inline]
 fn current_trap(lua_state: &LuaState) -> bool {
     #[cfg(not(feature = "sandbox"))]
     {

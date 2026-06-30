@@ -579,7 +579,7 @@ pub fn try_comp_tm(
     }
 }
 
-#[inline(always)]
+#[inline]
 pub fn call_newindex_tm_fast(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,

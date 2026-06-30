@@ -85,19 +85,19 @@ pub fn buildhiddenargs(
 }
 
 /// ttisinteger_ref - 引用版本（保留兼容性）
-#[inline(always)]
+#[inline]
 pub fn ttisinteger(v: &LuaValue) -> bool {
     v.ttisinteger()
 }
 
 /// ttisfloat_ref - 引用版本（保留兼容性）
-#[inline(always)]
+#[inline]
 pub fn ttisfloat(v: &LuaValue) -> bool {
     v.ttisfloat()
 }
 
 /// ttisstring_ref - 引用版本（保留兼容性）
-#[inline(always)]
+#[inline]
 pub fn ttisstring(v: &LuaValue) -> bool {
     v.is_string()
 }
@@ -105,27 +105,27 @@ pub fn ttisstring(v: &LuaValue) -> bool {
 // ============ 值访问宏 (对应 Lua 的 ivalue/fltvalue) ============
 
 /// ivalue_ref - 引用版本（保留兼容性）
-#[inline(always)]
+#[inline]
 pub fn ivalue(v: &LuaValue) -> i64 {
     v.ivalue()
 }
 
 /// setivalue_ref - 引用版本（保留兼容性）
-#[inline(always)]
+#[inline]
 pub fn setivalue(v: &mut LuaValue, i: i64) {
     v.tt = LUA_VNUMINT;
     v.value.i = i;
 }
 
 /// setnilvalue_ref - 引用版本（保留兼容性）
-#[inline(always)]
+#[inline]
 pub fn setnilvalue(v: &mut LuaValue) {
     // *v = LuaValue::nil();
     v.tt = LUA_VNIL;
     v.value = LuaInnerValue::NIL;
 }
 
-#[inline(always)]
+#[inline]
 pub fn setobjs2s(l: &mut LuaState, a: usize, b: usize) {
     let stack = l.stack_mut();
     unsafe {
@@ -134,7 +134,7 @@ pub fn setobjs2s(l: &mut LuaState, a: usize, b: usize) {
 }
 
 /// tointegerns_ref - 引用版本（保留兼容性）
-#[inline(always)]
+#[inline]
 pub fn tointegerns(v: &LuaValue, out: &mut i64) -> bool {
     if v.ttisinteger() {
         *out = v.ivalue();
@@ -158,7 +158,7 @@ pub fn tointegerns(v: &LuaValue, out: &mut i64) -> bool {
 }
 
 /// tonumberns - 引用版本
-#[inline(always)]
+#[inline]
 pub fn tonumberns(v: &LuaValue, out: &mut f64) -> bool {
     if v.ttisfloat() {
         *out = v.fltvalue();
@@ -740,7 +740,7 @@ fn finish_c_frame(lua_state: &mut LuaState, ci: &CallInfo) -> LuaResult<()> {
     }
 }
 
-#[inline(always)]
+#[inline]
 fn mark_pending_finish(ci: &mut CallInfo, aux: i32) {
     ci.set_pending_finish_get(aux);
     ci.call_status |= CIST_PENDING_FINISH;
@@ -1507,17 +1507,17 @@ pub fn return1_with_hook(lua_state: &mut LuaState, a_pos: usize, pc: usize) -> L
     poscall(lua_state, 1, pc)
 }
 
-#[inline(always)]
+#[inline]
 pub fn instr_at(code: &[Instruction], pc: usize) -> Instruction {
     unsafe { *code.get_unchecked(pc) }
 }
 
-#[inline(always)]
+#[inline]
 pub fn k_val(constants: &[LuaValue], index: u32) -> &LuaValue {
     unsafe { constants.get_unchecked(index as usize) }
 }
 
-#[inline(always)]
+#[inline]
 pub fn pk_val(constants: &[LuaValue], index: usize) -> StkId {
     StkId::from_const_ptr(unsafe { constants.get_unchecked(index) } as *const LuaValue)
 }

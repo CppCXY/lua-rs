@@ -1,7 +1,7 @@
 /*----------------------------------------------------------------------
   Lua 5.5 VM Arithmetic & Bitwise Operations
 
-  Extracted from execute_loop.rs macros into generic #[inline(always)]
+  Extracted from execute_loop.rs macros into generic #[inline]
   functions. Each function is monomorphized per call site, producing
   identical machine code to the original macro approach.
 
@@ -25,7 +25,7 @@ use crate::{
 /// Float fallback for arithmetic ops.
 /// Tries to convert both operands to f64 and apply the float operation.
 /// Mirrors the `op_arithf_aux!` macro.
-#[inline(always)]
+#[inline]
 fn arithf_aux(ra: StkId, pc: &mut usize, v1: StkId, v2: StkId, fop: impl Fn(f64, f64) -> f64) {
     let mut n1 = 0.0;
     let mut n2 = 0.0;
@@ -37,7 +37,7 @@ fn arithf_aux(ra: StkId, pc: &mut usize, v1: StkId, v2: StkId, fop: impl Fn(f64,
 
 // ── op_arithI: R[A] := iop(R[B], sC)  ──────────────────────────
 
-#[inline(always)]
+#[inline]
 pub(crate) fn op_arith_i(
     base_stk: StkId,
     pc: &mut usize,
@@ -60,7 +60,7 @@ pub(crate) fn op_arith_i(
 
 // ── op_arith: R[A] := iop(R[B], R[C])  ──────────────────────────
 
-#[inline(always)]
+#[inline]
 pub(crate) fn op_arith(
     base_stk: StkId,
     pc: &mut usize,
@@ -85,7 +85,7 @@ pub(crate) fn op_arith(
 
 // ── op_arithf: R[A] := fop(R[B], R[C])  ─────────────────────────
 
-#[inline(always)]
+#[inline]
 pub(crate) fn op_arithf(
     base_stk: StkId,
     pc: &mut usize,
@@ -106,7 +106,7 @@ pub(crate) fn op_arithf(
 
 // ── op_arithK: R[A] := iop(R[B], K[C])  ─────────────────────────
 
-#[inline(always)]
+#[inline]
 pub(crate) fn op_arith_k(
     base_stk: StkId,
     pc: &mut usize,
@@ -132,7 +132,7 @@ pub(crate) fn op_arith_k(
 
 // ── op_arithfK: R[A] := fop(R[B], K[C])  ────────────────────────
 
-#[inline(always)]
+#[inline]
 pub(crate) fn op_arithf_k(
     base_stk: StkId,
     pc: &mut usize,
@@ -154,7 +154,7 @@ pub(crate) fn op_arithf_k(
 
 // ── op_arith_check_zero: R[A] := iop(R[B], R[C]) with zero check ─
 #[allow(clippy::too_many_arguments)]
-#[inline(always)]
+#[inline]
 pub(crate) fn op_arith_check_zero(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -189,7 +189,7 @@ pub(crate) fn op_arith_check_zero(
 // ── op_arithK_check_zero: R[A] := iop(R[B], K[C]) with zero check ─
 
 #[allow(clippy::too_many_arguments)]
-#[inline(always)]
+#[inline]
 pub(crate) fn op_arithk_check_zero(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -224,7 +224,7 @@ pub(crate) fn op_arithk_check_zero(
 
 // ── op_bitwise: R[A] := op(R[B], R[C])  ─────────────────────────
 
-#[inline(always)]
+#[inline]
 pub(crate) fn op_bitwise(
     base_stk: StkId,
     pc: &mut usize,
@@ -244,7 +244,7 @@ pub(crate) fn op_bitwise(
 
 // ── op_bitwiseK: R[A] := op(R[B], K[C])  ────────────────────────
 
-#[inline(always)]
+#[inline]
 pub(crate) fn op_bitwise_k(
     base_stk: StkId,
     pc: &mut usize,
@@ -263,7 +263,7 @@ pub(crate) fn op_bitwise_k(
     }
 }
 
-#[inline(always)]
+#[inline]
 pub fn ptonumberns(v: StkId, out: &mut f64) -> bool {
     match v.tt() {
         LUA_VNUMFLT => {
@@ -278,7 +278,7 @@ pub fn ptonumberns(v: StkId, out: &mut f64) -> bool {
     }
 }
 
-#[inline(always)]
+#[inline]
 pub fn ptointegerns(v: StkId, out: &mut i64) -> bool {
     match v.tt() {
         LUA_VNUMINT => {
@@ -301,7 +301,7 @@ pub fn ptointegerns(v: StkId, out: &mut i64) -> bool {
 /// luaV_shiftl - Shift integer x left by y positions.
 /// If y is negative, shifts right (LOGICAL/unsigned shift).
 /// Matches Lua 5.5's luaV_shiftl from lvm.c.
-#[inline(always)]
+#[inline]
 pub fn lua_shiftl(x: i64, y: i64) -> i64 {
     if y < 0 {
         // Right shift (logical/unsigned)
@@ -322,14 +322,14 @@ pub fn lua_shiftl(x: i64, y: i64) -> i64 {
 
 /// luaV_shiftr - Shift integer x right by y positions.
 /// luaV_shiftr(x, y) = luaV_shiftl(x, -y)
-#[inline(always)]
+#[inline]
 pub fn lua_shiftr(x: i64, y: i64) -> i64 {
     lua_shiftl(x, y.wrapping_neg())
 }
 
 /// Lua floor division for integers: a // b
 /// Equivalent to luaV_idiv in Lua 5.5
-#[inline(always)]
+#[inline]
 pub fn lua_idiv(a: i64, b: i64) -> i64 {
     // Handle overflow case: MIN_INT / -1 would overflow, wrapping gives MIN_INT (floor division same result)
     if b == -1 {
@@ -347,7 +347,7 @@ pub fn lua_idiv(a: i64, b: i64) -> i64 {
 
 /// Lua modulo for integers: a % b
 /// Equivalent to luaV_mod in Lua 5.5: m = a % b; if m != 0 && (m ^ b) < 0 then m += b
-#[inline(always)]
+#[inline]
 pub fn lua_imod(a: i64, b: i64) -> i64 {
     // Handle overflow case: MIN_INT % -1 = 0
     if b == -1 {
@@ -363,7 +363,7 @@ pub fn lua_imod(a: i64, b: i64) -> i64 {
 
 /// Float modulo matching C Lua's `luai_nummod`.
 /// Uses hardware fmod (Rust's `%` operator on f64) then adjusts sign.
-#[inline(always)]
+#[inline]
 pub fn lua_fmod(a: f64, b: f64) -> f64 {
     let mut m = a % b; // C fmod
     if m != 0.0 && ((m > 0.0) != (b > 0.0)) {
@@ -374,7 +374,7 @@ pub fn lua_fmod(a: f64, b: f64) -> f64 {
 
 /// luai_numpow - Power operation matching Lua 5.5's luai_numpow macro:
 ///   #define luai_numpow(L,a,b)  ((b)==2 ? (a)*(a) : pow(a,b))
-#[inline(always)]
+#[inline]
 pub fn luai_numpow(a: f64, b: f64) -> f64 {
     if b == 2.0 {
         a * a
