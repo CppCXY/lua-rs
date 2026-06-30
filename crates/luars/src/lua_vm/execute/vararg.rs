@@ -1,10 +1,7 @@
 use crate::{
+    CallInfo,
     lua_value::{LuaProto, LuaValue},
-    lua_vm::{
-        LuaResult, LuaState,
-        execute::helper::{ivalue, setivalue, ttisinteger},
-        lua_limits::EXTRA_STACK,
-    },
+    lua_vm::{LuaResult, LuaState, StkId, lua_limits::EXTRA_STACK},
 };
 
 use super::helper::{buildhiddenargs, setnilvalue};
@@ -20,12 +17,12 @@ fn get_vatab_len(lua_state: &mut LuaState, base: usize, vatab_reg: usize) -> Lua
 
     if let Some(table) = table_val.as_table_mut() {
         // Read the "n" field from the table
-        let n_key = lua_state.create_string("n")?;
+        let n_key = lua_state.global_state().const_strings.str_n;
         let n_val = table.raw_get(&n_key);
 
         match n_val {
             Some(val) if val.is_integer() => {
-                let n = val.as_integer().unwrap();
+                let n = val.ivalue();
                 // l_castS2U(n) > cast_uint(INT_MAX/2) — treat as unsigned, must be <= i32::MAX/2
                 if (n as u64) > (i32::MAX as u64 / 2) {
                     return Err(lua_state.error("vararg table has no proper 'n'".to_string()));
@@ -127,71 +124,63 @@ pub fn get_varargs(
     Ok(())
 }
 
+#[inline(never)]
 pub fn get_vararg(
     lua_state: &mut LuaState,
-    base: usize,
-    ra_pos: usize,
-    rc_pos: usize,
+    ci: &mut CallInfo,
+    ra: StkId,
+    rc: StkId,
 ) -> LuaResult<()> {
-    let nextra = lua_state
-        .current_frame()
-        .expect("vararg access requires an active call frame")
-        .nextraargs as usize;
-
+    let nextra = ci.nextraargs as usize;
+    let base = ci.base;
     // Ensure stack is large enough for rc_pos access
-    if rc_pos >= lua_state.stack_len() {
-        lua_state.grow_stack(rc_pos + 1)?;
-    }
+    // if rc_pos >= lua_state.stack_len() {
+    //     lua_state.grow_stack(rc_pos + 1)?;
+    // }
 
-    let stack = lua_state.stack_mut();
-    let rc = stack[rc_pos];
-
-    if let Some(s) = rc.as_str() {
+    let rc_value = *rc.get_ref();
+    if let Some(s) = rc_value.as_str() {
         if s == "n" {
-            let stack = lua_state.stack_mut();
-            setivalue(&mut stack[ra_pos], nextra as i64);
+            ra.set_integer(nextra as i64);
         } else {
-            let stack = lua_state.stack_mut();
-            setnilvalue(&mut stack[ra_pos]);
+            ra.set_nil();
         }
-    } else if ttisinteger(&rc) {
-        let n = ivalue(&rc);
-        let stack = lua_state.stack_mut();
+    } else if rc_value.is_integer() {
+        let n = rc_value.ivalue();
         if nextra > 0 && n >= 1 && (n as usize) <= nextra {
             let slot = (base - 1) - nextra + (n as usize) - 1;
-            stack[ra_pos] = stack[slot];
+
+            ra.write(&lua_state.stack()[slot]);
         } else {
-            setnilvalue(&mut stack[ra_pos]);
+            ra.set_nil();
         }
-    } else if rc.is_float() {
+    } else if rc_value.is_float() {
         // Lua 5.5: tointegerns - convert integer-valued float to integer
-        let f = rc.as_float().unwrap();
+        let f = rc_value.as_float().unwrap();
         let n = f as i64;
         if (n as f64) == f {
             // Float is integer-valued
-            let stack = lua_state.stack_mut();
             if nextra > 0 && n >= 1 && (n as usize) <= nextra {
                 let slot = (base - 1) - nextra + (n as usize) - 1;
-                stack[ra_pos] = stack[slot];
+                ra.write(&lua_state.stack()[slot]);
             } else {
-                setnilvalue(&mut stack[ra_pos]);
+                ra.set_nil();
             }
         } else {
-            let stack = lua_state.stack_mut();
-            setnilvalue(&mut stack[ra_pos]);
+            ra.set_nil();
         }
     } else {
-        let stack = lua_state.stack_mut();
-        setnilvalue(&mut stack[ra_pos]);
+        ra.set_nil();
     }
     Ok(())
 }
 
 /// VARARGPREP: Adjust varargs (prepare vararg function)
+#[inline(never)]
 pub fn exec_varargprep(
     lua_state: &mut LuaState,
+    ci: &mut CallInfo,
     chunk: &LuaProto,
-    base: &mut usize,
 ) -> LuaResult<()> {
     // Use the nextraargs already computed correctly by push_frame,
     // which knows the actual argument count from the CALL instruction.
@@ -199,9 +188,6 @@ pub fn exec_varargprep(
     // stack_top to frame_top (base + maxstacksize) for GC safety,
     // which would give a wrong totalargs.
 
-    let ci = lua_state
-        .current_frame()
-        .expect("vararg access requires an active call frame");
     let nextra = ci.nextraargs as usize;
     let func_pos = ci.base - 1;
     let nfixparams = chunk.param_count;
@@ -270,8 +256,8 @@ pub fn exec_varargprep(
             lua_state.grow_stack(required_size)?;
         }
 
-        let new_base = buildhiddenargs(lua_state, chunk, totalargs, nfixparams, nextra)?;
-        *base = new_base;
+        let new_base = buildhiddenargs(lua_state, chunk, totalargs, nfixparams)?;
+        ci.base = new_base;
 
         // Lua 5.5: set vararg parameter register to nil (ltm.c:288)
         // The named vararg param (e.g., 't' in '...t') is at register nfixparams

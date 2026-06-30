@@ -852,7 +852,7 @@ pub(crate) fn op_new_table(
     (*base_stk).offset(a as usize).write(&value);
 
     let new_top = ci.base + a as usize + 1;
-    lua_state.check_gc_in_loop(*pc, new_top, trap);
+    lua_state.check_gc_in_loop(ci, *pc, new_top, trap);
     *base_stk = ci.base_stk;
     Ok(())
 }

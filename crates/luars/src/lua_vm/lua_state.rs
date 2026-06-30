@@ -4451,14 +4451,18 @@ impl LuaState {
     }
 
     #[inline(always)]
-    pub(crate) fn check_gc_in_loop(&mut self, pc: usize, c: usize, trap: &mut bool) {
+    pub(crate) fn check_gc_in_loop(
+        &mut self,
+        ci: &mut CallInfo,
+        pc: usize,
+        c: usize,
+        trap: &mut bool,
+    ) {
         if self.global_state.gc_debt() > 0 {
             return;
         }
 
-        self.current_frame_mut()
-            .expect("gc loop check requires an active call frame")
-            .save_pc(pc);
+        ci.save_pc(pc);
         self.set_top_raw(c);
         self.global_state.check_gc(self as *mut LuaState);
         *trap = self.hook_mask != 0;

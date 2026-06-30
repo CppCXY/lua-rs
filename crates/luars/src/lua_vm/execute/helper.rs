@@ -1,4 +1,4 @@
-use crate::lua_value::{LUA_VNIL, LUA_VNUMINT, LuaInnerValue};
+use crate::lua_value::{LUA_VNIL, LuaInnerValue};
 use crate::stdlib::basic::parse_number::parse_lua_number;
 use crate::stdlib::debug::{objtypename, ordererror, typeerror};
 use crate::{
@@ -29,12 +29,12 @@ use crate::{
 ///                 ^ ci->func                    ^ L->top
 /// Final stack: func nil ... nil extra1 ... func arg1 ... argn
 ///                                          ^ ci->func
+#[inline(never)]
 pub fn buildhiddenargs(
     lua_state: &mut LuaState,
     chunk: &LuaProto,
     totalargs: usize,
     nfixparams: usize,
-    _nextra: usize,
 ) -> LuaResult<usize> {
     let old_base = lua_state
         .current_frame()
@@ -108,13 +108,6 @@ pub fn ttisstring(v: &LuaValue) -> bool {
 #[inline]
 pub fn ivalue(v: &LuaValue) -> i64 {
     v.ivalue()
-}
-
-/// setivalue_ref - 引用版本（保留兼容性）
-#[inline]
-pub fn setivalue(v: &mut LuaValue, i: i64) {
-    v.tt = LUA_VNUMINT;
-    v.value.i = i;
 }
 
 /// setnilvalue_ref - 引用版本（保留兼容性）

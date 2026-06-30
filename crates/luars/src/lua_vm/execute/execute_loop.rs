@@ -741,7 +741,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             updatetrap!();
 
                             let top = lua_state.get_top();
-                            lua_state.check_gc_in_loop(pc, top, &mut trap);
+                            lua_state.check_gc_in_loop(ci, pc, top, &mut trap);
                             syncbase!();
                             continue;
                         }
@@ -763,7 +763,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     updatetrap!();
 
                     let top = lua_state.get_top();
-                    lua_state.check_gc_in_loop(pc, top, &mut trap);
+                    lua_state.check_gc_in_loop(ci, pc, top, &mut trap);
                     syncbase!();
                 }
                 OpCode::Close => {
@@ -1475,7 +1475,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         unsafe { std::slice::from_raw_parts(ci.upvalue_ptrs, chunk.upvalue_count) };
                     push_closure(lua_state, ci.base, a, proto_idx, chunk, upvalue_ptrs)?;
 
-                    lua_state.check_gc_in_loop(pc, ci.base + a + 1, &mut trap);
+                    lua_state.check_gc_in_loop(ci, pc, ci.base + a + 1, &mut trap);
                     syncbase!();
                 }
                 OpCode::Vararg => {
@@ -1499,9 +1499,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::GetVarg => {
-                    let a = ci.base + instr.get_a() as usize;
-                    let c = ci.base + instr.get_c() as usize;
-                    get_vararg(lua_state, ci.base, a, c)?;
+                    let a = instr.get_a() as usize;
+                    let c = instr.get_c() as usize;
+                    get_vararg(lua_state, ci, base_stk.offset(a), base_stk.offset(c))?;
                 }
                 OpCode::ErrNNil => {
                     let a = instr.get_a();
@@ -1525,10 +1525,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::VarargPrep => {
                     ci.save_pc(pc);
-                    let mut base = ci.base;
-                    exec_varargprep(lua_state, chunk, &mut base)?;
+
+                    exec_varargprep(lua_state, ci, chunk)?;
                     // Re-sync base_stk after potential base change
-                    base_stk = StkId::from_stack(lua_state.stack_mut().as_mut_ptr(), base);
+                    base_stk = StkId::from_stack(lua_state.stack_mut().as_mut_ptr(), ci.base);
 
                     // After varargprep, hook call if hooks are active
                     let hook_mask = lua_state.hook_mask;
