@@ -1,13 +1,14 @@
 // Native Lua 5.5-style table implementation
 // Port of ltable.c with minimal abstractions for maximum performance
 
-use crate::gc::{GcString, StringPtr, TableAllocHandle};
+use crate::gc::{GcString, StringPtr};
 use crate::lua_value::{
     LuaValue,
     lua_value::{LUA_TNIL, LUA_VEMPTY, LUA_VNIL, LUA_VNUMINT, LUA_VSHRSTR, Value, novariant},
     short_string_ptr_eq,
 };
 
+use std::alloc::{self, Layout};
 use std::ptr;
 
 /// Node for hash table - packed to 24 bytes matching Lua 5.5's Node layout.
@@ -103,19 +104,55 @@ pub struct NativeTable {
     /// Last free position in hash table (optimization like Lua 5.5)
     /// Points to next candidate for free slot search
     lastfree: *mut Node,
-    allocator: TableAllocHandle,
 }
 
 impl NativeTable {
+    #[inline(always)]
+    fn alloc_array(total_size: usize, align: usize) -> *mut u8 {
+        let layout = Layout::from_size_align(total_size, align).unwrap();
+        let ptr = unsafe { alloc::alloc_zeroed(layout) };
+        if ptr.is_null() {
+            alloc::handle_alloc_error(layout);
+        }
+        ptr
+    }
+
+    #[inline(always)]
+    fn free_array(ptr: *mut u8, total_size: usize, align: usize) {
+        if ptr.is_null() || total_size == 0 {
+            return;
+        }
+        let layout = Layout::from_size_align(total_size, align).unwrap();
+        unsafe { alloc::dealloc(ptr, layout) };
+    }
+
+    #[inline(always)]
+    fn alloc_hash<T>(size: usize) -> *mut T {
+        let layout = Layout::array::<T>(size).unwrap();
+        let ptr = unsafe { alloc::alloc_zeroed(layout) as *mut T };
+        if ptr.is_null() {
+            alloc::handle_alloc_error(layout);
+        }
+        ptr
+    }
+
+    #[inline(always)]
+    fn free_hash<T>(ptr: *mut T, size: usize) {
+        if size == 0 || ptr.is_null() {
+            return;
+        }
+        let layout = Layout::array::<T>(size).unwrap();
+        unsafe { alloc::dealloc(ptr as *mut u8, layout) };
+    }
+
     /// Create new table with given capacity
-    pub fn new(array_cap: u32, hash_cap: u32, allocator: TableAllocHandle) -> Self {
+    pub fn new(array_cap: u32, hash_cap: u32) -> Self {
         let mut table = Self {
             array: ptr::null_mut(),
             asize: 0,
             node: ptr::null_mut(),
             lsizenode: 0,
             lastfree: ptr::null_mut(),
-            allocator,
         };
 
         if array_cap > 0 {
@@ -141,12 +178,7 @@ impl NativeTable {
         let tags_size = new_size as usize;
         let total_size = values_size + lenhint_size + tags_size;
 
-        let start_ptr = self
-            .allocator
-            .alloc_array_bytes(total_size, std::mem::align_of::<Value>());
-        if start_ptr.is_null() {
-            panic!("Failed to allocate array");
-        }
+        let start_ptr = Self::alloc_array(total_size, std::mem::align_of::<Value>());
 
         self.array = unsafe { start_ptr.add(values_size) };
         self.asize = new_size;
@@ -159,10 +191,7 @@ impl NativeTable {
         debug_assert_eq!(self.lsizenode, 0);
 
         let new_size = 1usize << new_lsize;
-        let new_node = self.allocator.alloc_hash_nodes::<Node>(new_size);
-        if new_node.is_null() {
-            panic!("Failed to allocate hash nodes");
-        }
+        let new_node = Self::alloc_hash::<Node>(new_size);
 
         self.node = new_node;
         self.lsizenode = new_lsize;
@@ -718,13 +747,8 @@ impl NativeTable {
                 let tags_size = self.asize as usize;
                 let total_size = values_size + lenhint_size + tags_size;
 
-                // array pointer points to lenhint, need to go back to start
                 let start_ptr = unsafe { self.array.sub(values_size) };
-                self.allocator.free_array_bytes(
-                    start_ptr,
-                    total_size,
-                    std::mem::align_of::<Value>(),
-                );
+                Self::free_array(start_ptr, total_size, std::mem::align_of::<Value>());
             }
             self.array = ptr::null_mut();
             self.asize = 0;
@@ -740,12 +764,7 @@ impl NativeTable {
         let total_size = values_size + lenhint_size + tags_size;
 
         // Allocate new memory — zeroed, since LUA_VNIL==0 and Value::nil()==0
-        let start_ptr = self
-            .allocator
-            .alloc_array_bytes(total_size, std::mem::align_of::<Value>());
-        if start_ptr.is_null() {
-            panic!("Failed to allocate array");
-        }
+        let start_ptr = Self::alloc_array(total_size, std::mem::align_of::<Value>());
 
         // Set array pointer to point at lenhint position
         let new_array = unsafe { start_ptr.add(values_size) };
@@ -778,8 +797,7 @@ impl NativeTable {
             let old_values_size = old_size as usize * std::mem::size_of::<Value>();
             let old_start = unsafe { self.array.sub(old_values_size) };
             let old_total = old_values_size + lenhint_size + old_size as usize;
-            self.allocator
-                .free_array_bytes(old_start, old_total, std::mem::align_of::<Value>());
+            Self::free_array(old_start, old_total, std::mem::align_of::<Value>());
         }
 
         self.array = new_array;
@@ -820,16 +838,13 @@ impl NativeTable {
                         }
                     }
                 }
-                self.allocator.free_hash_nodes(old_node, old_size);
+                Self::free_hash(old_node, old_size);
             }
             return Self::hash_mem_bytes(0) - old_bytes + extra_delta;
         }
 
         // Allocate new hash array — zeroed, since Node{nil,nil,0} is all-zero bytes
-        let new_node = self.allocator.alloc_hash_nodes::<Node>(new_size);
-        if new_node.is_null() {
-            panic!("Failed to allocate hash nodes");
-        }
+        let new_node = Self::alloc_hash::<Node>(new_size);
 
         self.node = new_node;
         self.lsizenode = new_lsize;
@@ -877,7 +892,7 @@ impl NativeTable {
                 }
             }
 
-            self.allocator.free_hash_nodes(old_node, old_size);
+            Self::free_hash(old_node, old_size);
         }
         Self::hash_mem_bytes(self.sizenode()) - old_bytes + extra_delta
     }
@@ -2108,14 +2123,13 @@ impl Drop for NativeTable {
 
             // array points to lenhint, so start is array - values_size
             let start_ptr = unsafe { self.array.sub(values_size) };
-            self.allocator
-                .free_array_bytes(start_ptr, total_size, std::mem::align_of::<Value>());
+            Self::free_array(start_ptr, total_size, std::mem::align_of::<Value>());
         }
 
         // Free hash
         let size = self.sizenode();
         if size > 0 && !self.is_dummy() {
-            self.allocator.free_hash_nodes(self.node, size);
+            Self::free_hash(self.node, size);
         }
     }
 }
@@ -2133,7 +2147,7 @@ mod tests {
 
     #[test]
     fn test_native_table_basic() {
-        let mut t = NativeTable::new(4, 4, TableAllocHandle::default());
+        let mut t = NativeTable::new(4, 4);
 
         // Test integer keys
         let key1 = LuaValue::integer(1);
@@ -2154,7 +2168,7 @@ mod tests {
 
     #[test]
     fn test_array_part() {
-        let mut t = NativeTable::new(10, 0, TableAllocHandle::default());
+        let mut t = NativeTable::new(10, 0);
 
         for i in 1..=10 {
             t.set_int(i, LuaValue::integer(i * 10));
@@ -2169,7 +2183,7 @@ mod tests {
 
     #[test]
     fn test_hash_collisions() {
-        let mut t = NativeTable::new(0, 4, TableAllocHandle::default());
+        let mut t = NativeTable::new(0, 4);
 
         // Add many items to force collisions
         for i in 0..20 {
@@ -2190,7 +2204,7 @@ mod tests {
     fn test_performance_integer_keys() {
         use std::time::Instant;
 
-        let mut t = NativeTable::new(100, 100, TableAllocHandle::default());
+        let mut t = NativeTable::new(100, 100);
 
         let start = Instant::now();
 
@@ -2231,7 +2245,7 @@ mod tests {
 
         assert!(share_lua_value(&mut shared_key));
 
-        let mut table = NativeTable::new(0, 4, TableAllocHandle::default());
+        let mut table = NativeTable::new(0, 4);
         table.raw_set(&shared_key, value);
 
         assert_eq!(table.raw_get(&local_key), Some(value));
@@ -2257,7 +2271,7 @@ mod tests {
 
         assert!(share_lua_value(&mut shared_key));
 
-        let mut table = NativeTable::new(0, 4, TableAllocHandle::default());
+        let mut table = NativeTable::new(0, 4);
         table.raw_set(&shared_key, LuaValue::integer(1));
 
         let result = table.pset_shortstr(&local_key, LuaValue::integer(3));

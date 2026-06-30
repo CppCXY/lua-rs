@@ -39,7 +39,6 @@ mod gc_object;
 mod object_allocator;
 mod paged_pool;
 mod string_interner;
-mod table_allocator;
 
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
@@ -54,7 +53,6 @@ pub use gc_object::*;
 pub use object_allocator::*;
 pub use paged_pool::*;
 pub use string_interner::*;
-pub use table_allocator::*;
 
 // GC Parameters (from lua.h)
 pub const MINORMUL: usize = 0; // Minor collection multiplier

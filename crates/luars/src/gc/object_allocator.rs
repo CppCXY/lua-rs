@@ -8,8 +8,7 @@ use crate::{
     LuaRawFunction, LuaRawTable, LuaResult, LuaValue,
     gc::{
         GC, GcCClosure, GcFunction, GcObjectOwner, GcProto, GcRClosure, GcString, GcTable,
-        GcThread, GcUpvalue, GcUserdata, PagedPool, Pooled, ProtoPtr, StringPtr, TableAllocHandle,
-        UpvaluePtr,
+        GcThread, GcUpvalue, GcUserdata, PagedPool, Pooled, ProtoPtr, StringPtr, UpvaluePtr,
     },
 };
 
@@ -26,7 +25,6 @@ pub struct ObjectAllocator {
     userdata_pool: PagedPool<GcUserdata>,
     proto_pool: PagedPool<GcProto>,
     call_info_pool: PagedPool<CallInfo>,
-    table_allocator: TableAllocHandle,
 }
 
 impl Default for ObjectAllocator {
@@ -48,7 +46,6 @@ impl ObjectAllocator {
             userdata_pool: PagedPool::new(16),
             proto_pool: PagedPool::new(16),
             call_info_pool: PagedPool::new(64),
-            table_allocator: TableAllocHandle::default(),
         }
     }
 
@@ -121,11 +118,7 @@ impl ObjectAllocator {
         };
         let size = (base_size + array_bytes + hash_bytes) as u32;
         let ptr = self.table_pool.alloc(GcTable::new(
-            LuaRawTable::new(
-                array_size as u32,
-                hash_size as u32,
-                self.table_allocator.clone(),
-            ),
+            LuaRawTable::new(array_size as u32, hash_size as u32),
             current_white,
             size,
         ));
@@ -280,7 +273,6 @@ impl ObjectAllocator {
     pub fn trim_after_full_gc(&mut self) {
         self.table_pool.release_empty_pages();
         self.string_pool.release_empty_pages();
-        self.table_allocator.clear_cached_blocks();
         self.cclosure_pool.release_empty_pages();
         self.rclosure_pool.release_empty_pages();
         self.upvalue_pool.release_empty_pages();

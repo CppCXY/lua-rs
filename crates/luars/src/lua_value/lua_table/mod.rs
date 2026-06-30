@@ -2,10 +2,7 @@
 pub mod native_table;
 
 use super::lua_value::LuaValue;
-use crate::{
-    LuaError, LuaResult,
-    gc::{TableAllocHandle, TablePtr},
-};
+use crate::{LuaError, LuaResult, gc::TablePtr};
 use native_table::NativeTable;
 
 /// Mask covering all TM flags — any bit set to 1 represents a cacheable TM.
@@ -23,11 +20,11 @@ pub struct LuaRawTable {
 
 impl LuaRawTable {
     /// 创建新table
-    pub fn new(asize: u32, hsize: u32, allocator: TableAllocHandle) -> Self {
+    pub fn new(asize: u32, hsize: u32) -> Self {
         Self {
             meta: TablePtr::null(),
             flags: 0,
-            impl_table: NativeTable::new(asize, hsize, allocator),
+            impl_table: NativeTable::new(asize, hsize),
         }
     }
 
