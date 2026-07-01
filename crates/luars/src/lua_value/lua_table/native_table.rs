@@ -47,7 +47,7 @@ impl Node {
 
     /// Write value from LuaValue
     #[inline(always)]
-    fn set_value(&mut self, v: LuaValue) {
+    fn set_value(&mut self, v: &LuaValue) {
         self.val_data = v.value;
         self.val_tt = v.tt;
     }
@@ -66,7 +66,7 @@ impl Node {
 
     /// Write key from LuaValue
     #[inline(always)]
-    fn set_key(&mut self, k: LuaValue) {
+    fn set_key(&mut self, k: &LuaValue) {
         self.key_data = k.value;
         self.key_tt = k.tt;
     }
@@ -348,7 +348,7 @@ impl NativeTable {
                     && short_string_ptr_eq((*node).key_string_ptr(), key_ptr)
                 {
                     if (*node).val_tt != LUA_VNIL {
-                        (*node).set_value(value);
+                        (*node).set_value(&value);
                         return true;
                     }
                     return false;
@@ -395,7 +395,7 @@ impl NativeTable {
             loop {
                 if (*node).key_tt == LUA_VNUMINT && (*node).key_data.i == key {
                     if (*node).val_tt != LUA_VNIL {
-                        (*node).set_value(value);
+                        (*node).set_value(&value);
                         return true;
                     }
                     return false;
@@ -483,7 +483,7 @@ impl NativeTable {
             }
 
             if (*mp).key_tt == LUA_VNIL {
-                (*mp).set_key(*key);
+                (*mp).set_key(key);
                 (*mp).set_value_parts(value, tt);
                 (*mp).next = 0;
                 return ShortStrSetResult::Done {
@@ -511,7 +511,7 @@ impl NativeTable {
                     if (*free_node).next != 0 {
                         (*free_node).next += Self::node_offset(free_node, mp);
                     }
-                    (*mp).set_key(*key);
+                    (*mp).set_key(&key);
                     (*mp).set_value_parts(value, tt);
                     (*mp).next = 0;
                     return ShortStrSetResult::Done {
@@ -523,7 +523,7 @@ impl NativeTable {
             }
 
             if let Some(free_node) = self.getfreepos() {
-                (*free_node).set_key(*key);
+                (*free_node).set_key(key);
                 (*free_node).set_value_parts(value, tt);
                 if (*mp).next != 0 {
                     (*free_node).next =
@@ -562,7 +562,7 @@ impl NativeTable {
             } => {
                 unsafe {
                     let node = self.node.add(node_index);
-                    (*node).set_key(*key);
+                    (*node).set_key(key);
                     (*node).set_value_parts(value.value, value.tt);
                 }
                 (new_key, 0)
@@ -598,14 +598,14 @@ impl NativeTable {
             let mp = self.mainposition_string(key);
 
             if (*mp).key_tt == LUA_VNIL {
-                (*mp).set_key(*key);
+                (*mp).set_key(key);
                 (*mp).set_value_parts(value.value, value.tt);
                 (*mp).next = 0;
                 return true;
             }
 
             if (*mp).val_tt == LUA_VNIL {
-                (*mp).set_key(*key);
+                (*mp).set_key(key);
                 (*mp).set_value_parts(value.value, value.tt);
                 return true;
             }
@@ -622,7 +622,7 @@ impl NativeTable {
                     if (*free_node).next != 0 {
                         (*free_node).next += Self::node_offset(free_node, mp);
                     }
-                    (*mp).set_key(*key);
+                    (*mp).set_key(key);
                     (*mp).set_value_parts(value.value, value.tt);
                     (*mp).next = 0;
                     return true;
@@ -631,7 +631,7 @@ impl NativeTable {
             }
 
             if let Some(free_node) = self.getfreepos() {
-                (*free_node).set_key(*key);
+                (*free_node).set_key(key);
                 (*free_node).set_value_parts(value.value, value.tt);
                 if (*mp).next != 0 {
                     (*free_node).next =
@@ -1483,7 +1483,7 @@ impl NativeTable {
                 loop {
                     // Skip dead keys (value nil) - avoid UAF on freed strings
                     if (*node).val_tt != LUA_VNIL && (*node).key() == key {
-                        (*node).set_value(LuaValue::nil());
+                        (*node).set_value(&LuaValue::nil());
                         return (false, 0);
                     }
                     let next = (*node).next;
@@ -1501,8 +1501,8 @@ impl NativeTable {
             // Fall through to insert below — hash is now allocated
             let mp = self.mainposition(&key);
             unsafe {
-                (*mp).set_key(key);
-                (*mp).set_value(value);
+                (*mp).set_key(&key);
+                (*mp).set_value(&value);
                 (*mp).next = 0;
             }
             return (true, delta);
@@ -1518,8 +1518,8 @@ impl NativeTable {
             // When reusing a dead key's slot, preserve the `next` link so that
             // any chain passing through this slot remains intact.
             if (*mp).key_tt == LUA_VNIL {
-                (*mp).set_key(key);
-                (*mp).set_value(value);
+                (*mp).set_key(&key);
+                (*mp).set_value(&value);
                 (*mp).next = 0;
                 return (true, 0);
             }
@@ -1537,13 +1537,13 @@ impl NativeTable {
                     scan = scan.offset(next_off as isize);
                     if (*scan).val_tt != LUA_VNIL && (*scan).key() == key {
                         // Key exists alive in chain — just update value
-                        (*scan).set_value(value);
+                        (*scan).set_value(&value);
                         return (false, 0);
                     }
                 }
                 // Key not found in chain — safe to reuse this dead slot
-                (*mp).set_key(key);
-                (*mp).set_value(value);
+                (*mp).set_key(&key);
+                (*mp).set_value(&value);
                 // Keep (*mp).next as-is — other chains may pass through here
                 return (true, 0);
             }
@@ -1572,8 +1572,8 @@ impl NativeTable {
                         (*free_node).next += Self::node_offset(free_node, mp);
                     }
                     // Now mp is free for the new key
-                    (*mp).set_key(key);
-                    (*mp).set_value(value);
+                    (*mp).set_key(&key);
+                    (*mp).set_value(&value);
                     (*mp).next = 0;
                     return (true, 0);
                 }
@@ -1587,7 +1587,7 @@ impl NativeTable {
                 loop {
                     // Skip dead keys (value nil) to avoid UAF on freed strings
                     if (*node).val_tt != LUA_VNIL && (*node).key() == key {
-                        (*node).set_value(value);
+                        (*node).set_value(&value);
                         return (false, 0);
                     }
                     let next = (*node).next;
@@ -1599,8 +1599,8 @@ impl NativeTable {
 
                 // Key not found - insert at a free position
                 if let Some(free_node) = self.getfreepos() {
-                    (*free_node).set_key(key);
-                    (*free_node).set_value(value);
+                    (*free_node).set_key(&key);
+                    (*free_node).set_value(&value);
                     // Link new node at the HEAD of the chain (right after mp),
                     // matching C Lua 5.5 behavior: gnext(f) = mp+gnext(mp) - f
                     if (*mp).next != 0 {
