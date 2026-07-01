@@ -511,7 +511,7 @@ impl NativeTable {
                     if (*free_node).next != 0 {
                         (*free_node).next += Self::node_offset(free_node, mp);
                     }
-                    (*mp).set_key(&key);
+                    (*mp).set_key(key);
                     (*mp).set_value_parts(value, tt);
                     (*mp).next = 0;
                     return ShortStrSetResult::Done {
