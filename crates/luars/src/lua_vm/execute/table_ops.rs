@@ -282,17 +282,20 @@ pub(crate) fn op_set_tabup(
         meta = table.meta_ptr();
         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
             let (new_key, delta, is_collectable) = if instr.get_k() {
-                let rc = *k_val(constants, c);
-                let pset_result = table.impl_table.pset_shortstr(key, rc);
-                let (new_key, delta) = table.impl_table.finish_shortstr_set(key, rc, pset_result);
-                (new_key, delta, rc.is_collectable())
-            } else {
-                let rc = (*base_stk).offset(c as usize);
-                let pset_result = table.impl_table.pset_shortstr(key, rc.get());
+                let rc_value = k_val(constants, c);
+                let pset_result = table.impl_table.pset_shortstr(key, rc_value);
                 let (new_key, delta) =
                     table
                         .impl_table
-                        .finish_shortstr_set(key, rc.get(), pset_result);
+                        .finish_shortstr_set(key, rc_value, pset_result);
+                (new_key, delta, rc_value.is_collectable())
+            } else {
+                let rc = (*base_stk).offset(c as usize);
+                let pset_result = table.impl_table.pset_shortstr(key, rc.get_ref());
+                let (new_key, delta) =
+                    table
+                        .impl_table
+                        .finish_shortstr_set(key, rc.get_ref(), pset_result);
                 (new_key, delta, rc.is_collectable())
             };
             if new_key {
@@ -446,17 +449,25 @@ pub(crate) fn op_set_table(
         {
             let key = rb.get_ref();
             let (new_key, delta, needs_barrier) = if instr.get_k() {
-                let rc = *k_val(constants, c);
-                let pset_result = table.impl_table.pset_shortstr(key, rc);
-                let (new_key, delta) = table.impl_table.finish_shortstr_set(key, rc, pset_result);
-                (new_key, delta, rc.is_collectable() || key.is_collectable())
-            } else {
-                let rc = base.offset(c as usize);
-                let pset_result = table.impl_table.pset_shortstr(key, rc.get());
+                let rc_value = k_val(constants, c);
+                let pset_result = table.impl_table.pset_shortstr(key, rc_value);
                 let (new_key, delta) =
                     table
                         .impl_table
-                        .finish_shortstr_set(key, rc.get(), pset_result);
+                        .finish_shortstr_set(key, rc_value, pset_result);
+                (
+                    new_key,
+                    delta,
+                    rc_value.is_collectable() || key.is_collectable(),
+                )
+            } else {
+                let rc = base.offset(c as usize);
+
+                let pset_result = table.impl_table.pset_shortstr(key, rc.get_ref());
+                let (new_key, delta) =
+                    table
+                        .impl_table
+                        .finish_shortstr_set(key, rc.get_ref(), pset_result);
                 (new_key, delta, (rc.is_collectable() || rb.is_collectable()))
             };
             if new_key {
@@ -645,17 +656,20 @@ pub(crate) fn op_set_field(
         meta = table.meta_ptr();
         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
             let (new_key, delta, is_collectable) = if instr.get_k() {
-                let rc = *k_val(constants, c);
-                let pset_result = table.impl_table.pset_shortstr(key, rc);
-                let (new_key, delta) = table.impl_table.finish_shortstr_set(key, rc, pset_result);
-                (new_key, delta, rc.is_collectable())
-            } else {
-                let rc = (*base_stk).offset(c as usize);
-                let pset_result = table.impl_table.pset_shortstr(key, rc.get());
+                let rc_value = k_val(constants, c);
+                let pset_result = table.impl_table.pset_shortstr(key, rc_value);
                 let (new_key, delta) =
                     table
                         .impl_table
-                        .finish_shortstr_set(key, rc.get(), pset_result);
+                        .finish_shortstr_set(key, rc_value, pset_result);
+                (new_key, delta, rc_value.is_collectable())
+            } else {
+                let rc = (*base_stk).offset(c as usize);
+                let pset_result = table.impl_table.pset_shortstr(key, rc.get_ref());
+                let (new_key, delta) =
+                    table
+                        .impl_table
+                        .finish_shortstr_set(key, rc.get_ref(), pset_result);
                 (new_key, delta, rc.is_collectable())
             };
             if new_key {

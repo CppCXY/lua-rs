@@ -414,12 +414,12 @@ impl NativeTable {
     /// Performs at most one chain walk and reports whether the operation fully
     /// completed on the fast path or must be finished through a C-Lua-like
     /// encoded continuation.
-    #[inline(never)]
-    pub fn pset_shortstr(&mut self, key: &LuaValue, value: LuaValue) -> ShortStrSetResult {
+    #[inline]
+    pub fn pset_shortstr(&mut self, key: &LuaValue, value: &LuaValue) -> ShortStrSetResult {
         self.pset_shortstr_parts(key, value.value, value.tt)
     }
 
-    #[inline(always)]
+    #[inline]
     pub(crate) fn pset_shortstr_parts(
         &mut self,
         key: &LuaValue,
@@ -547,11 +547,11 @@ impl NativeTable {
         ((node as usize) - (self.node as usize)) / std::mem::size_of::<Node>()
     }
 
-    #[inline(never)]
+    #[inline]
     pub fn finish_shortstr_set(
         &mut self,
         key: &LuaValue,
-        value: LuaValue,
+        value: &LuaValue,
         result: ShortStrSetResult,
     ) -> (bool, isize) {
         match result {
@@ -563,7 +563,7 @@ impl NativeTable {
                 unsafe {
                     let node = self.node.add(node_index);
                     (*node).set_key(*key);
-                    (*node).set_value(value);
+                    (*node).set_value_parts(value.value, value.tt);
                 }
                 (new_key, 0)
             }
@@ -571,7 +571,7 @@ impl NativeTable {
         }
     }
 
-    fn insert_new_shortstr(&mut self, key: &LuaValue, value: LuaValue) -> (bool, isize) {
+    fn insert_new_shortstr(&mut self, key: &LuaValue, value: &LuaValue) -> (bool, isize) {
         debug_assert!(key.is_short_string());
         debug_assert!(!value.is_nil());
 
@@ -589,7 +589,7 @@ impl NativeTable {
         (true, mem_delta)
     }
 
-    fn insert_new_shortstr_no_rehash(&mut self, key: &LuaValue, value: LuaValue) -> bool {
+    fn insert_new_shortstr_no_rehash(&mut self, key: &LuaValue, value: &LuaValue) -> bool {
         debug_assert!(self.has_hash());
         debug_assert!(key.is_short_string());
         debug_assert!(!value.is_nil());
@@ -599,14 +599,14 @@ impl NativeTable {
 
             if (*mp).key_tt == LUA_VNIL {
                 (*mp).set_key(*key);
-                (*mp).set_value(value);
+                (*mp).set_value_parts(value.value, value.tt);
                 (*mp).next = 0;
                 return true;
             }
 
             if (*mp).val_tt == LUA_VNIL {
                 (*mp).set_key(*key);
-                (*mp).set_value(value);
+                (*mp).set_value_parts(value.value, value.tt);
                 return true;
             }
 
@@ -623,7 +623,7 @@ impl NativeTable {
                         (*free_node).next += Self::node_offset(free_node, mp);
                     }
                     (*mp).set_key(*key);
-                    (*mp).set_value(value);
+                    (*mp).set_value_parts(value.value, value.tt);
                     (*mp).next = 0;
                     return true;
                 }
@@ -632,7 +632,7 @@ impl NativeTable {
 
             if let Some(free_node) = self.getfreepos() {
                 (*free_node).set_key(*key);
-                (*free_node).set_value(value);
+                (*free_node).set_value_parts(value.value, value.tt);
                 if (*mp).next != 0 {
                     (*free_node).next =
                         Self::node_offset(free_node, mp.offset((*mp).next as isize));
@@ -875,7 +875,7 @@ impl NativeTable {
                     if (*old_n).key_tt == LUA_VSHRSTR {
                         let key = LuaValue::from_raw((*old_n).key_data, (*old_n).key_tt);
                         let value = LuaValue::from_raw((*old_n).val_data, (*old_n).val_tt);
-                        let inserted = self.insert_new_shortstr_no_rehash(&key, value);
+                        let inserted = self.insert_new_shortstr_no_rehash(&key, &value);
                         debug_assert!(
                             inserted,
                             "freshly resized hash must fit live short-string keys"
@@ -1711,8 +1711,8 @@ impl NativeTable {
         }
 
         if key.is_short_string() {
-            let result = self.pset_shortstr(&key, value);
-            return self.finish_shortstr_set(&key, value, result);
+            let result = self.pset_shortstr(&key, &value);
+            return self.finish_shortstr_set(&key, &value, result);
         }
 
         // Not in array range - use hash part
