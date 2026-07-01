@@ -490,6 +490,7 @@ impl NativeTable {
                 if (*node).key_tt == LUA_VSHRSTR
                     && short_string_ptr_eq((*node).key_string_ptr(), key_ptr)
                 {
+                    // Value update: HOK path
                     if (*node).val_tt != LUA_VNIL {
                         (*node).set_value_parts(value, tt);
                         return ShortStrSetResult::Done {
@@ -497,6 +498,7 @@ impl NativeTable {
                             mem_delta: 0,
                         };
                     }
+                    // Reactivate dead key
                     return if tt == LUA_VNIL {
                         ShortStrSetResult::Done {
                             new_key: false,
@@ -523,62 +525,24 @@ impl NativeTable {
                 };
             }
 
-            if (*mp).key_tt == LUA_VNIL {
-                (*mp).set_key(key);
-                (*mp).set_value_parts(value, tt);
-                (*mp).next = 0;
-                return ShortStrSetResult::Done {
-                    new_key: true,
-                    mem_delta: 0,
-                };
-            }
-            if (*mp).val_tt == LUA_VNIL {
+            // Key NOT FOUND in chain.  Return FinishNode / FinishNewKey WITHOUT
+            // writing the value: the caller must check __newindex BEFORE calling
+            // finish_shortstr_set to commit the write.  This is the C Lua 5.5
+            // behavior: luaH_psetshortstr only writes for HOK; new keys are
+            // handled by luaV_finishset after the metatable check.
+
+            // mp empty or dead: the caller's finish_shortstr_set writes key+value.
+            if (*mp).key_tt == LUA_VNIL || (*mp).val_tt == LUA_VNIL {
                 return ShortStrSetResult::FinishNode {
                     new_key: true,
                     node_index: self.node_index(mp),
                 };
             }
 
-            let othern = self.mainposition_from_node(mp);
-            if othern != mp {
-                if let Some(free_node) = self.getfreepos() {
-                    let mut prev = othern;
-                    while prev.offset((*prev).next as isize) != mp {
-                        prev = prev.offset((*prev).next as isize);
-                    }
-                    (*prev).next = Self::node_offset(prev, free_node);
-                    *free_node = *mp;
-                    if (*free_node).next != 0 {
-                        (*free_node).next += Self::node_offset(free_node, mp);
-                    }
-                    (*mp).set_key(key);
-                    (*mp).set_value_parts(value, tt);
-                    (*mp).next = 0;
-                    return ShortStrSetResult::Done {
-                        new_key: true,
-                        mem_delta: 0,
-                    };
-                }
-                return ShortStrSetResult::FinishNewKey;
-            }
-
-            if let Some(free_node) = self.getfreepos() {
-                (*free_node).set_key(key);
-                (*free_node).set_value_parts(value, tt);
-                if (*mp).next != 0 {
-                    (*free_node).next =
-                        Self::node_offset(free_node, mp.offset((*mp).next as isize));
-                } else {
-                    (*free_node).next = 0;
-                }
-                (*mp).next = Self::node_offset(mp, free_node);
-                return ShortStrSetResult::Done {
-                    new_key: true,
-                    mem_delta: 0,
-                };
-            }
+            // Displacement or collision insertion needed — delegate to
+            // insert_new_shortstr_no_rehash (called via FinishNewKey).
+            ShortStrSetResult::FinishNewKey
         }
-        ShortStrSetResult::FinishNewKey
     }
 
     #[inline(always)]
