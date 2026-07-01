@@ -38,6 +38,20 @@ pub enum ShortStrSetResult {
     FinishNewKey,
 }
 
+impl ShortStrSetResult {
+    /// True when value was updated in-place (existing key, no rehash).
+    #[inline(always)]
+    pub fn is_hok(&self) -> bool {
+        matches!(
+            self,
+            ShortStrSetResult::Done {
+                new_key: false,
+                mem_delta: 0
+            }
+        )
+    }
+}
+
 impl Node {
     /// Read value as LuaValue
     #[inline(always)]
@@ -334,7 +348,7 @@ impl NativeTable {
     /// Mirrors C Lua's fastset semantics: when the key already has a live slot,
     /// the update can ignore `__newindex` and complete in place.
     #[inline]
-    pub fn set_existing_shortstr(&mut self, key: &LuaValue, value: LuaValue) -> bool {
+    pub fn set_existing_shortstr(&mut self, key: &LuaValue, value: &LuaValue) -> bool {
         if self.node.is_null() {
             return false;
         }
@@ -348,7 +362,7 @@ impl NativeTable {
                     && short_string_ptr_eq((*node).key_string_ptr(), key_ptr)
                 {
                     if (*node).val_tt != LUA_VNIL {
-                        (*node).set_value(&value);
+                        (*node).set_value(value);
                         return true;
                     }
                     return false;
@@ -410,22 +424,13 @@ impl NativeTable {
         }
     }
 
-    /// Specialized short-string set path inspired by Lua 5.5's `luaH_psetshortstr`.
-    /// Performs at most one chain walk and reports whether the operation fully
-    /// completed on the fast path or must be finished through a C-Lua-like
-    /// encoded continuation.
+    /// Specialized short-string set — merged pset + pset_parts for inlining.
+    /// On hot path (existing key at main position): returns HOK.
+    /// On miss: delegates to the out-of-line slow path for collision/new-key.
     #[inline]
     pub fn pset_shortstr(&mut self, key: &LuaValue, value: &LuaValue) -> ShortStrSetResult {
-        self.pset_shortstr_parts(key, value.value, value.tt)
-    }
-
-    #[inline]
-    pub(crate) fn pset_shortstr_parts(
-        &mut self,
-        key: &LuaValue,
-        value: Value,
-        tt: u8,
-    ) -> ShortStrSetResult {
+        let tt = value.tt;
+        let v = value.value;
         debug_assert!(key.is_short_string());
 
         if self.node.is_null() {
@@ -442,6 +447,43 @@ impl NativeTable {
         let mp = self.mainposition_string(key);
         let key_ptr = key.string_ptr_raw();
 
+        // Inline fast path: existing key at main position (99%+)
+        unsafe {
+            if (*mp).key_tt == LUA_VSHRSTR && short_string_ptr_eq((*mp).key_string_ptr(), key_ptr) {
+                if (*mp).val_tt != LUA_VNIL {
+                    (*mp).set_value_parts(v, tt);
+                    return ShortStrSetResult::Done {
+                        new_key: false,
+                        mem_delta: 0,
+                    };
+                }
+                return if tt == LUA_VNIL {
+                    ShortStrSetResult::Done {
+                        new_key: false,
+                        mem_delta: 0,
+                    }
+                } else {
+                    ShortStrSetResult::FinishNode {
+                        new_key: true,
+                        node_index: self.node_index(mp),
+                    }
+                };
+            }
+        }
+
+        // Slow path: collision chain, displacement, insertion
+        self.pset_shortstr_slow(key, mp, v, tt)
+    }
+
+    #[inline(never)]
+    fn pset_shortstr_slow(
+        &mut self,
+        key: &LuaValue,
+        mp: *mut Node,
+        value: Value,
+        tt: u8,
+    ) -> ShortStrSetResult {
+        let key_ptr = key.string_ptr_raw();
         unsafe {
             let mut node = mp;
             loop {
@@ -467,7 +509,6 @@ impl NativeTable {
                         }
                     };
                 }
-
                 let next = (*node).next;
                 if next == 0 {
                     break;
@@ -491,7 +532,6 @@ impl NativeTable {
                     mem_delta: 0,
                 };
             }
-
             if (*mp).val_tt == LUA_VNIL {
                 return ShortStrSetResult::FinishNode {
                     new_key: true,
@@ -538,7 +578,6 @@ impl NativeTable {
                 };
             }
         }
-
         ShortStrSetResult::FinishNewKey
     }
 

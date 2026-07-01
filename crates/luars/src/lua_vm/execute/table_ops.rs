@@ -309,13 +309,13 @@ pub(crate) fn op_set_tabup(
             }
             return Ok(());
         } else {
-            let rc = if instr.get_k() {
-                *k_val(constants, c)
+            let rc_value = if instr.get_k() {
+                k_val(constants, c)
             } else {
-                (*base_stk).offset(c as usize).get()
+                (*base_stk).offset(c as usize).get_ref()
             };
-            if table.impl_table.set_existing_shortstr(key, rc) {
-                if rc.is_collectable() {
+            if table.impl_table.set_existing_shortstr(key, rc_value) {
+                if rc_value.is_collectable() {
                     lua_state.gc_barrier_back(gc_ptr);
                 }
                 return Ok(());
@@ -483,40 +483,43 @@ pub(crate) fn op_set_table(
         }
     }
 
-    let rc = if instr.get_k() {
-        *k_val(constants, c)
+    let rc_value = if instr.get_k() {
+        k_val(constants, c)
     } else {
-        base.offset(c as usize).get()
+        base.offset(c as usize).get_ref()
     };
     if ra.is_table() {
         let table = ra.hvalue_mut();
         let meta = table.meta_ptr();
         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
             if !rb.is_nil() && !rb.is_integer() {
-                let (_new_key, delta) = table.impl_table.raw_set(rb.get_ref(), rc);
+                let (_new_key, delta) = table.impl_table.raw_set(rb.get_ref(), *rc_value);
                 if delta != 0 {
                     lua_state.gc_track_table_resize(ra.as_table_ptr(), delta);
                 }
-                if rc.is_collectable() || rb.is_collectable() {
+                if rc_value.is_collectable() || rb.is_collectable() {
                     lua_state.gc_barrier_back(ra.as_gc_ptr());
                 }
                 return Ok(());
             }
         } else if rb.is_short_string() {
-            if table.impl_table.set_existing_shortstr(rb.get_ref(), rc) {
-                if rc.is_collectable() || rb.is_collectable() {
+            if table
+                .impl_table
+                .set_existing_shortstr(rb.get_ref(), rc_value)
+            {
+                if rc_value.is_collectable() || rb.is_collectable() {
                     lua_state.gc_barrier_back(ra.as_gc_ptr());
                 }
                 return Ok(());
             }
             ci.save_pc(pc);
             lua_state.set_top_raw(ci.top as usize);
-            if call_newindex_tm_fast(lua_state, ci, ra.get(), meta, rb.get(), rc)? {
+            if call_newindex_tm_fast(lua_state, ci, ra.get(), meta, rb.get(), *rc_value)? {
                 *base_stk = ci.base_stk;
                 updatetrap!(trap, lua_state);
                 return Ok(());
             }
-            finishset_fallback(lua_state, ci, ra.get_ref(), rb.get_ref(), rc, true)?;
+            finishset_fallback(lua_state, ci, ra.get_ref(), rb.get_ref(), *rc_value, true)?;
             *base_stk = ci.base_stk;
             updatetrap!(trap, lua_state);
             return Ok(());
@@ -524,7 +527,7 @@ pub(crate) fn op_set_table(
     }
     ci.save_pc(pc);
     lua_state.set_top_raw(ci.top as usize);
-    finishset_fallback(lua_state, ci, ra.get_ref(), rb.get_ref(), rc, false)?;
+    finishset_fallback(lua_state, ci, ra.get_ref(), rb.get_ref(), *rc_value, false)?;
     *base_stk = ci.base_stk;
     updatetrap!(trap, lua_state);
     Ok(())
@@ -630,6 +633,10 @@ pub(crate) fn op_set_i(
 }
 
 /// SetField: R[A][K[B]:string] := RK(C)
+///
+/// Lua 5.5 style: try luaH_psetshortstr first, only check metatable
+/// when the set fails. The metatable check is NOT on the hot path for
+/// existing-key updates — unlike the previous implementation.
 #[inline]
 pub(crate) fn op_set_field(
     lua_state: &mut LuaState,
@@ -645,75 +652,72 @@ pub(crate) fn op_set_field(
     let c = instr.get_c();
     let ra = (*base_stk).offset(a as usize);
     let key = k_val(constants, b);
-    debug_assert!(
-        key.is_short_string(),
-        "SetField key must be short string for fast path"
-    );
-    let mut known_newindex_miss = false;
-    let mut meta = TablePtr::null();
+    debug_assert!(key.is_short_string(), "SetField key must be short string");
+
+    // Unified value extraction (RKC in C)
+    let (rc_ref, rc_is_collectable) = if instr.get_k() {
+        let v = k_val(constants, c);
+        (v, v.is_collectable())
+    } else {
+        let stk = (*base_stk).offset(c as usize);
+        (stk.get_ref(), stk.is_collectable())
+    };
+
+    // luaV_fastset: try set first, no metatable check on hot path
     if ra.is_table() {
         let table = ra.hvalue_mut();
-        meta = table.meta_ptr();
+        let pset_result = table.impl_table.pset_shortstr(key, rc_ref);
+
+        // HOK: existing key updated. Just GC barrier.
+        if pset_result.is_hok() {
+            if rc_is_collectable {
+                lua_state.gc_barrier_back(ra.as_gc_ptr());
+            }
+            return Ok(());
+        }
+
+        // Need finish. Check metatable only for the fallback.
+        let meta = table.meta_ptr();
         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
-            let (new_key, delta, is_collectable) = if instr.get_k() {
-                let rc_value = k_val(constants, c);
-                let pset_result = table.impl_table.pset_shortstr(key, rc_value);
-                let (new_key, delta) =
-                    table
-                        .impl_table
-                        .finish_shortstr_set(key, rc_value, pset_result);
-                (new_key, delta, rc_value.is_collectable())
-            } else {
-                let rc = (*base_stk).offset(c as usize);
-                let pset_result = table.impl_table.pset_shortstr(key, rc.get_ref());
-                let (new_key, delta) =
-                    table
-                        .impl_table
-                        .finish_shortstr_set(key, rc.get_ref(), pset_result);
-                (new_key, delta, rc.is_collectable())
-            };
+            let (new_key, delta) = table
+                .impl_table
+                .finish_shortstr_set(key, rc_ref, pset_result);
             if new_key {
                 table.invalidate_tm_cache();
             }
             if delta != 0 {
                 lua_state.gc_track_table_resize(ra.as_table_ptr(), delta);
             }
-            if is_collectable {
+            if rc_is_collectable {
                 lua_state.gc_barrier_back(ra.as_gc_ptr());
             }
             return Ok(());
-        } else {
-            let rc = if instr.get_k() {
-                *k_val(constants, c)
-            } else {
-                (*base_stk).offset(c as usize).get()
-            };
-            if table.impl_table.set_existing_shortstr(key, rc) {
-                if rc.is_collectable() {
-                    lua_state.gc_barrier_back(ra.as_gc_ptr());
-                }
-                return Ok(());
-            }
-            known_newindex_miss = true;
         }
-    }
-    let rc = if instr.get_k() {
-        *k_val(constants, c)
-    } else {
-        (*base_stk).offset(c as usize).get()
-    };
-    ci.save_pc(pc);
-    lua_state.set_top_raw(ci.top as usize);
-    if known_newindex_miss {
-        if call_newindex_tm_fast(lua_state, ci, ra.get(), meta, *key, rc)? {
+
+        // Has __newindex: try existing-key set first, then call metamethod
+        if table.impl_table.set_existing_shortstr(key, rc_ref) {
+            if rc_ref.is_collectable() {
+                lua_state.gc_barrier_back(ra.as_gc_ptr());
+            }
+            return Ok(());
+        }
+        ci.save_pc(pc);
+        lua_state.set_top_raw(ci.top as usize);
+        if call_newindex_tm_fast(lua_state, ci, ra.get(), meta, *key, *rc_ref)? {
             *base_stk = ci.base_stk;
             updatetrap!(trap, lua_state);
             return Ok(());
         }
-        finishset_fallback(lua_state, ci, ra.get_ref(), key, rc, true)?;
-    } else {
-        finishset_fallback(lua_state, ci, ra.get_ref(), key, rc, false)?;
+        finishset_fallback(lua_state, ci, ra.get_ref(), key, *rc_ref, true)?;
+        *base_stk = ci.base_stk;
+        updatetrap!(trap, lua_state);
+        return Ok(());
     }
+
+    // Not a table: metamethod fallback
+    ci.save_pc(pc);
+    lua_state.set_top_raw(ci.top as usize);
+    finishset_fallback(lua_state, ci, ra.get_ref(), key, *rc_ref, false)?;
     *base_stk = ci.base_stk;
     updatetrap!(trap, lua_state);
     Ok(())
