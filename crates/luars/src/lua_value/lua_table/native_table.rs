@@ -2274,8 +2274,8 @@ mod tests {
         let mut table = NativeTable::new(0, 4);
         table.raw_set(&shared_key, LuaValue::integer(1));
 
-        let result = table.pset_shortstr(&local_key, LuaValue::integer(3));
-        let (new_key, _) = table.finish_shortstr_set(&local_key, LuaValue::integer(3), result);
+        let result = table.pset_shortstr(&local_key, &LuaValue::integer(3));
+        let (new_key, _) = table.finish_shortstr_set(&local_key, &LuaValue::integer(3), result);
 
         assert!(!new_key);
         assert_eq!(table.raw_get(&shared_key), Some(LuaValue::integer(3)));
