@@ -320,27 +320,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     continue;
                 }
                 OpCode::GetTable => {
-                    table_ops::op_get_table(
-                        lua_state,
-                        ci,
-                        &mut base_stk,
-                        &mut pc,
-                        &mut trap,
-                        instr,
-                        constants,
-                    )?;
+                    table_ops::op_get_table(lua_state, ci, &mut base_stk, pc, &mut trap, instr)?;
                     continue;
                 }
                 OpCode::GetI => {
-                    table_ops::op_get_i(
-                        lua_state,
-                        ci,
-                        &mut base_stk,
-                        &mut pc,
-                        &mut trap,
-                        instr,
-                        constants,
-                    )?;
+                    table_ops::op_get_i(lua_state, ci, &mut base_stk, pc, &mut trap, instr)?;
                     continue;
                 }
                 OpCode::GetField => {
@@ -348,7 +332,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         lua_state,
                         ci,
                         &mut base_stk,
-                        &mut pc,
+                        pc,
                         &mut trap,
                         instr,
                         constants,
@@ -360,7 +344,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         lua_state,
                         ci,
                         &mut base_stk,
-                        &mut pc,
+                        pc,
                         &mut trap,
                         instr,
                         constants,
@@ -372,7 +356,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         lua_state,
                         ci,
                         &mut base_stk,
-                        &mut pc,
+                        pc,
                         &mut trap,
                         instr,
                         constants,
@@ -384,7 +368,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         lua_state,
                         ci,
                         &mut base_stk,
-                        &mut pc,
+                        pc,
                         &mut trap,
                         instr,
                         constants,
@@ -396,7 +380,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         lua_state,
                         ci,
                         &mut base_stk,
-                        &mut pc,
+                        pc,
                         &mut trap,
                         instr,
                         constants,
@@ -419,7 +403,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         lua_state,
                         ci,
                         &mut base_stk,
-                        &mut pc,
+                        pc,
                         &mut trap,
                         instr,
                         constants,
@@ -1292,7 +1276,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     lua_state.set_top_raw(a_pos + n as usize);
                     ci.save_pc(pc);
-                    poscall(lua_state, n as usize, pc)?;
+                    poscall(lua_state, ci, n as usize, pc)?;
                     // Reload caller frame and continue dispatch (avoid outer loop roundtrip)
                     reload_after_return!();
                     continue;
@@ -1301,7 +1285,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // return (no values)
                     if lua_state.hook_mask & (LUA_MASKRET | LUA_MASKLINE) != 0 {
                         ci.save_pc(pc);
-                        return0_with_hook(lua_state, ci.base + instr.get_a() as usize, pc)?;
+                        return0_with_hook(lua_state, ci, ci.base + instr.get_a() as usize, pc)?;
                         break;
                     }
 
@@ -1329,7 +1313,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // return R[A]  (single value)
                     if lua_state.hook_mask & (LUA_MASKRET | LUA_MASKLINE) != 0 {
                         ci.save_pc(pc);
-                        return1_with_hook(lua_state, ci.base + instr.get_a() as usize, pc)?;
+                        return1_with_hook(lua_state, ci, ci.base + instr.get_a() as usize, pc)?;
                         break;
                     }
 

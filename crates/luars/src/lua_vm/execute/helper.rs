@@ -1480,24 +1480,28 @@ pub fn eq_fallback(
 
 /// Cold path: Return0 with active hooks — delegates to generic poscall
 #[inline(never)]
-pub fn return0_with_hook(lua_state: &mut LuaState, a_pos: usize, pc: usize) -> LuaResult<()> {
+pub fn return0_with_hook(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    a_pos: usize,
+    pc: usize,
+) -> LuaResult<()> {
     lua_state.set_top_raw(a_pos);
-    lua_state
-        .current_frame_mut()
-        .expect("saving pc requires an active call frame")
-        .save_pc(pc);
-    poscall(lua_state, 0, pc)
+    ci.save_pc(pc);
+    poscall(lua_state, ci, 0, pc)
 }
 
 /// Cold path: Return1 with active hooks — delegates to generic poscall
 #[inline(never)]
-pub fn return1_with_hook(lua_state: &mut LuaState, a_pos: usize, pc: usize) -> LuaResult<()> {
+pub fn return1_with_hook(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    a_pos: usize,
+    pc: usize,
+) -> LuaResult<()> {
     lua_state.set_top_raw(a_pos + 1);
-    lua_state
-        .current_frame_mut()
-        .expect("saving pc requires an active call frame")
-        .save_pc(pc);
-    poscall(lua_state, 1, pc)
+    ci.save_pc(pc);
+    poscall(lua_state, ci, 1, pc)
 }
 
 #[inline]

@@ -2,7 +2,7 @@
 ///
 /// Implements CALL and TAILCALL opcodes via `precall` / `pretailcall`.
 use crate::{
-    LUA_MASKCALL, LUA_MASKRET, LuaProto, LuaValue,
+    CallInfo, LUA_MASKCALL, LUA_MASKRET, LuaProto, LuaValue,
     gc::UpvaluePtr,
     lua_vm::{
         CFunction, LUA_HOOKCALL, LUA_HOOKRET, LuaResult, LuaState, StkId, TmKind,
@@ -572,21 +572,19 @@ fn pretailcall_meta(lua_state: &mut LuaState, func_idx: usize, narg1: usize) -> 
 ///
 /// Caller must set `lua_state.top = ra + nres` before calling (results
 /// are at `top - nres .. top - 1`).
-pub fn poscall(lua_state: &mut LuaState, nres: usize, pc: usize) -> LuaResult<()> {
-    let nresults = lua_state
-        .current_frame()
-        .expect("return handling requires an active call frame")
-        .nresults();
+pub fn poscall(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    nres: usize,
+    pc: usize,
+) -> LuaResult<()> {
+    let nresults = ci.nresults();
 
     // Return hook (cold path — almost never fires)
     if lua_state.hook_mask & LUA_MASKRET != 0 && lua_state.allow_hook {
         hook_on_return(lua_state, pc, nres as i32)?;
     }
 
-    // res = ci->func.p  (destination for results)
-    let ci = lua_state
-        .current_frame()
-        .expect("return handling requires an active call frame");
     let res = ci.base - ci.func_offset as usize;
 
     // moveresults: move nres values from top-nres to res, adjusted for wanted count

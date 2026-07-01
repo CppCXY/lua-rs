@@ -32,7 +32,18 @@ use crate::{
     },
 };
 
-// ── GET operations ──────────────────────────────────────────────
+macro_rules! updatetrap {
+    ($trap:expr, $lua_state:expr) => {
+        #[cfg(not(feature = "sandbox"))]
+        {
+            *$trap = $lua_state.hook_mask != 0;
+        }
+        #[cfg(feature = "sandbox")]
+        {
+            *$trap = $lua_state.has_active_instruction_watch();
+        }
+    };
+}
 
 /// GetTabUp: R[A] := UpValue[B][K[C]:shortstring]
 #[allow(clippy::too_many_arguments)]
@@ -97,14 +108,7 @@ pub(crate) fn op_get_tabup(
     let upval_value = *upval_value;
     finishget_fallback(lua_state, ci, &upval_value, key, dest)?;
     *base_stk = ci.base_stk;
-    #[cfg(not(feature = "sandbox"))]
-    {
-        *trap = lua_state.hook_mask != 0;
-    }
-    #[cfg(feature = "sandbox")]
-    {
-        *trap = lua_state.has_active_instruction_watch();
-    }
+    updatetrap!(trap, lua_state);
     Ok(())
 }
 
@@ -114,10 +118,9 @@ pub(crate) fn op_get_table(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
     base_stk: &mut StkId,
-    _pc: &mut usize,
+    pc: usize,
     trap: &mut bool,
     instr: Instruction,
-    _constants: &[LuaValue],
 ) -> LuaResult<()> {
     let a = instr.get_a();
     let b = instr.get_b();
@@ -155,34 +158,20 @@ pub(crate) fn op_get_table(
             return Ok(());
         }
 
-        ci.save_pc(*_pc);
+        ci.save_pc(pc);
         lua_state.set_top_raw(ci.top as usize);
         finishget_fallback(lua_state, ci, rb.get_ref(), rc.get_ref(), dest)?;
         *base_stk = ci.base_stk;
-        #[cfg(not(feature = "sandbox"))]
-        {
-            *trap = lua_state.hook_mask != 0;
-        }
-        #[cfg(feature = "sandbox")]
-        {
-            *trap = lua_state.has_active_instruction_watch();
-        }
+        updatetrap!(trap, lua_state);
         return Ok(());
     }
 
     // Metamethod / non-table fallback
-    ci.save_pc(*_pc);
+    ci.save_pc(pc);
     lua_state.set_top_raw(ci.top as usize);
     finishget_fallback(lua_state, ci, rb.get_ref(), rc.get_ref(), dest)?;
     *base_stk = ci.base_stk;
-    #[cfg(not(feature = "sandbox"))]
-    {
-        *trap = lua_state.hook_mask != 0;
-    }
-    #[cfg(feature = "sandbox")]
-    {
-        *trap = lua_state.has_active_instruction_watch();
-    }
+    updatetrap!(trap, lua_state);
     Ok(())
 }
 
@@ -192,10 +181,9 @@ pub(crate) fn op_get_i(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
     base_stk: &mut StkId,
-    _pc: &mut usize,
+    pc: usize,
     trap: &mut bool,
     instr: Instruction,
-    _constants: &[LuaValue],
 ) -> LuaResult<()> {
     let a = instr.get_a();
     let b = instr.get_b();
@@ -218,18 +206,11 @@ pub(crate) fn op_get_i(
         }
     }
 
-    ci.save_pc(*_pc);
+    ci.save_pc(pc);
     lua_state.set_top_raw(ci.top as usize);
     finishget_fallback(lua_state, ci, rb.get_ref(), &LuaValue::integer(rc), dest)?;
     *base_stk = ci.base_stk;
-    #[cfg(not(feature = "sandbox"))]
-    {
-        *trap = lua_state.hook_mask != 0;
-    }
-    #[cfg(feature = "sandbox")]
-    {
-        *trap = lua_state.has_active_instruction_watch();
-    }
+    updatetrap!(trap, lua_state);
     Ok(())
 }
 
@@ -239,7 +220,7 @@ pub(crate) fn op_get_field(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
     base_stk: &mut StkId,
-    _pc: &mut usize,
+    pc: usize,
     trap: &mut bool,
     instr: Instruction,
     constants: &[LuaValue],
@@ -260,19 +241,12 @@ pub(crate) fn op_get_field(
             }
         }
     }
-    ci.save_pc(*_pc);
+    ci.save_pc(pc);
     lua_state.set_top_raw(ci.top as usize);
     let rb = rb.get();
     finishget_fallback(lua_state, ci, &rb, key, base.offset(instr.get_a() as usize))?;
     *base_stk = ci.base_stk;
-    #[cfg(not(feature = "sandbox"))]
-    {
-        *trap = lua_state.hook_mask != 0;
-    }
-    #[cfg(feature = "sandbox")]
-    {
-        *trap = lua_state.has_active_instruction_watch();
-    }
+    updatetrap!(trap, lua_state);
     Ok(())
 }
 
@@ -284,7 +258,7 @@ pub(crate) fn op_set_tabup(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
     base_stk: &mut StkId,
-    pc: &mut usize,
+    pc: usize,
     trap: &mut bool,
     instr: Instruction,
     constants: &[LuaValue],
@@ -353,19 +327,12 @@ pub(crate) fn op_set_tabup(
     } else {
         (*base_stk).offset(c as usize).get()
     };
-    ci.save_pc(*pc);
+    ci.save_pc(pc);
     lua_state.set_top_raw(ci.top as usize);
     if known_newindex_miss {
         if call_newindex_tm_fast(lua_state, ci, upval_value, meta, *key, rc)? {
             *base_stk = ci.base_stk;
-            #[cfg(not(feature = "sandbox"))]
-            {
-                *trap = lua_state.hook_mask != 0;
-            }
-            #[cfg(feature = "sandbox")]
-            {
-                *trap = lua_state.has_active_instruction_watch();
-            }
+            updatetrap!(trap, lua_state);
             return Ok(());
         }
         finishset_fallback(lua_state, ci, &upval_value, key, rc, true)?;
@@ -373,14 +340,7 @@ pub(crate) fn op_set_tabup(
         finishset_fallback(lua_state, ci, &upval_value, key, rc, false)?;
     }
     *base_stk = ci.base_stk;
-    #[cfg(not(feature = "sandbox"))]
-    {
-        *trap = lua_state.hook_mask != 0;
-    }
-    #[cfg(feature = "sandbox")]
-    {
-        *trap = lua_state.has_active_instruction_watch();
-    }
+    updatetrap!(trap, lua_state);
     Ok(())
 }
 
@@ -390,7 +350,7 @@ pub(crate) fn op_set_table(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
     base_stk: &mut StkId,
-    pc: &mut usize,
+    pc: usize,
     trap: &mut bool,
     instr: Instruction,
     constants: &[LuaValue],
@@ -463,30 +423,16 @@ pub(crate) fn op_set_table(
             } else {
                 base.offset(c as usize).get()
             };
-            ci.save_pc(*pc);
+            ci.save_pc(pc);
             lua_state.set_top_raw(ci.top as usize);
             if call_newindex_tm_fast(lua_state, ci, ra.get(), meta, rb.get(), rc)? {
                 *base_stk = ci.base_stk;
-                #[cfg(not(feature = "sandbox"))]
-                {
-                    *trap = lua_state.hook_mask != 0;
-                }
-                #[cfg(feature = "sandbox")]
-                {
-                    *trap = lua_state.has_active_instruction_watch();
-                }
+                updatetrap!(trap, lua_state);
                 return Ok(());
             }
             finishset_fallback(lua_state, ci, ra.get_ref(), rb.get_ref(), rc, true)?;
             *base_stk = ci.base_stk;
-            #[cfg(not(feature = "sandbox"))]
-            {
-                *trap = lua_state.hook_mask != 0;
-            }
-            #[cfg(feature = "sandbox")]
-            {
-                *trap = lua_state.has_active_instruction_watch();
-            }
+            updatetrap!(trap, lua_state);
             return Ok(());
         }
     }
@@ -552,45 +498,24 @@ pub(crate) fn op_set_table(
                 }
                 return Ok(());
             }
-            ci.save_pc(*pc);
+            ci.save_pc(pc);
             lua_state.set_top_raw(ci.top as usize);
             if call_newindex_tm_fast(lua_state, ci, ra.get(), meta, rb.get(), rc)? {
                 *base_stk = ci.base_stk;
-                #[cfg(not(feature = "sandbox"))]
-                {
-                    *trap = lua_state.hook_mask != 0;
-                }
-                #[cfg(feature = "sandbox")]
-                {
-                    *trap = lua_state.has_active_instruction_watch();
-                }
+                updatetrap!(trap, lua_state);
                 return Ok(());
             }
             finishset_fallback(lua_state, ci, ra.get_ref(), rb.get_ref(), rc, true)?;
             *base_stk = ci.base_stk;
-            #[cfg(not(feature = "sandbox"))]
-            {
-                *trap = lua_state.hook_mask != 0;
-            }
-            #[cfg(feature = "sandbox")]
-            {
-                *trap = lua_state.has_active_instruction_watch();
-            }
+            updatetrap!(trap, lua_state);
             return Ok(());
         }
     }
-    ci.save_pc(*pc);
+    ci.save_pc(pc);
     lua_state.set_top_raw(ci.top as usize);
     finishset_fallback(lua_state, ci, ra.get_ref(), rb.get_ref(), rc, false)?;
     *base_stk = ci.base_stk;
-    #[cfg(not(feature = "sandbox"))]
-    {
-        *trap = lua_state.hook_mask != 0;
-    }
-    #[cfg(feature = "sandbox")]
-    {
-        *trap = lua_state.has_active_instruction_watch();
-    }
+    updatetrap!(trap, lua_state);
     Ok(())
 }
 
@@ -600,7 +525,7 @@ pub(crate) fn op_set_i(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
     base_stk: &mut StkId,
-    pc: &mut usize,
+    pc: usize,
     trap: &mut bool,
     instr: Instruction,
     constants: &[LuaValue],
@@ -666,30 +591,16 @@ pub(crate) fn op_set_i(
             }
             // Fall through to finishset fallback (known miss)
             let rb = LuaValue::integer(b);
-            ci.save_pc(*pc);
+            ci.save_pc(pc);
             lua_state.set_top_raw(ci.top as usize);
             if call_newindex_tm_fast(lua_state, ci, ra.get(), meta, rb, rc)? {
                 *base_stk = ci.base_stk;
-                #[cfg(not(feature = "sandbox"))]
-                {
-                    *trap = lua_state.hook_mask != 0;
-                }
-                #[cfg(feature = "sandbox")]
-                {
-                    *trap = lua_state.has_active_instruction_watch();
-                }
+                updatetrap!(trap, lua_state);
                 return Ok(());
             }
             finishset_fallback(lua_state, ci, ra.get_ref(), &rb, rc, true)?;
             *base_stk = ci.base_stk;
-            #[cfg(not(feature = "sandbox"))]
-            {
-                *trap = lua_state.hook_mask != 0;
-            }
-            #[cfg(feature = "sandbox")]
-            {
-                *trap = lua_state.has_active_instruction_watch();
-            }
+            updatetrap!(trap, lua_state);
             return Ok(());
         }
     }
@@ -699,18 +610,11 @@ pub(crate) fn op_set_i(
         base.offset(c as usize).get()
     };
     let rb = LuaValue::integer(b);
-    ci.save_pc(*pc);
+    ci.save_pc(pc);
     lua_state.set_top_raw(ci.top as usize);
     finishset_fallback(lua_state, ci, ra.get_ref(), &rb, rc, false)?;
     *base_stk = ci.base_stk;
-    #[cfg(not(feature = "sandbox"))]
-    {
-        *trap = lua_state.hook_mask != 0;
-    }
-    #[cfg(feature = "sandbox")]
-    {
-        *trap = lua_state.has_active_instruction_watch();
-    }
+    updatetrap!(trap, lua_state);
     Ok(())
 }
 
@@ -720,7 +624,7 @@ pub(crate) fn op_set_field(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
     base_stk: &mut StkId,
-    pc: &mut usize,
+    pc: usize,
     trap: &mut bool,
     instr: Instruction,
     constants: &[LuaValue],
@@ -784,19 +688,12 @@ pub(crate) fn op_set_field(
     } else {
         (*base_stk).offset(c as usize).get()
     };
-    ci.save_pc(*pc);
+    ci.save_pc(pc);
     lua_state.set_top_raw(ci.top as usize);
     if known_newindex_miss {
         if call_newindex_tm_fast(lua_state, ci, ra.get(), meta, *key, rc)? {
             *base_stk = ci.base_stk;
-            #[cfg(not(feature = "sandbox"))]
-            {
-                *trap = lua_state.hook_mask != 0;
-            }
-            #[cfg(feature = "sandbox")]
-            {
-                *trap = lua_state.has_active_instruction_watch();
-            }
+            updatetrap!(trap, lua_state);
             return Ok(());
         }
         finishset_fallback(lua_state, ci, ra.get_ref(), key, rc, true)?;
@@ -804,14 +701,7 @@ pub(crate) fn op_set_field(
         finishset_fallback(lua_state, ci, ra.get_ref(), key, rc, false)?;
     }
     *base_stk = ci.base_stk;
-    #[cfg(not(feature = "sandbox"))]
-    {
-        *trap = lua_state.hook_mask != 0;
-    }
-    #[cfg(feature = "sandbox")]
-    {
-        *trap = lua_state.has_active_instruction_watch();
-    }
+    updatetrap!(trap, lua_state);
     Ok(())
 }
 
@@ -863,7 +753,7 @@ pub(crate) fn op_self(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
     base_stk: &mut StkId,
-    _pc: &mut usize,
+    pc: usize,
     trap: &mut bool,
     instr: Instruction,
     constants: &[LuaValue],
@@ -889,30 +779,16 @@ pub(crate) fn op_self(
         }
         if self_shortstr_index_chain_fast(lua_state, &rb, key, base.offset(a as usize)) {
             *base_stk = ci.base_stk;
-            #[cfg(not(feature = "sandbox"))]
-            {
-                *trap = lua_state.hook_mask != 0;
-            }
-            #[cfg(feature = "sandbox")]
-            {
-                *trap = lua_state.has_active_instruction_watch();
-            }
+            updatetrap!(trap, lua_state);
             return Ok(());
         }
     }
 
-    ci.save_pc(*_pc);
+    ci.save_pc(pc);
     lua_state.set_top_raw(ci.top as usize);
     finishget_fallback(lua_state, ci, &rb, key, base.offset(a as usize))?;
     *base_stk = ci.base_stk;
-    #[cfg(not(feature = "sandbox"))]
-    {
-        *trap = lua_state.hook_mask != 0;
-    }
-    #[cfg(feature = "sandbox")]
-    {
-        *trap = lua_state.has_active_instruction_watch();
-    }
+    updatetrap!(trap, lua_state);
     Ok(())
 }
 
