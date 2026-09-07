@@ -451,15 +451,15 @@ pub(crate) fn finishset(
                 && let Some(key_str) = key.as_str()
             {
                 let udv = lua_value_to_udvalue(&value);
-                match ud.get_trait_mut() {
-                    Ok(trait_obj) => match trait_obj.set_field(key_str, udv) {
+                {
+                    let trait_obj = ud.get_trait_mut()?;
+                    match trait_obj.set_field(key_str, udv) {
                         Some(Ok(())) => return Ok(true),
                         Some(Err(msg)) => {
                             return Err(lua_state.error(msg));
                         }
                         None => {} // Fall through to metatable
-                    },
-                    Err(e) => return Err(e),
+                    }
                 }
             }
             // Get __newindex metamethod

@@ -228,7 +228,7 @@ impl OpCode {
 
     /// Unchecked opcode decoding for the hot interpreter dispatch.
     ///
-    /// SAFETY: `byte` must be a valid opcode discriminant in `0..=127`.
+    /// # Safety: `byte` must be a valid opcode discriminant in `0..=127`.
     /// Bytecode produced by this compiler only ever contains valid opcodes.
     #[inline(always)]
     pub unsafe fn from_u8_unchecked(byte: u8) -> Self {
