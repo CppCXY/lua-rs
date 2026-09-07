@@ -112,6 +112,10 @@ pub struct LuaState {
     /// Implements Lua's optimization: never shrink call_stack, only move this index
     call_depth: usize,
 
+    /// Direct pointer to the current (top) `CallInfo`.
+    /// Mirrors C Lua's `L->ci` and is kept in sync with `call_depth`.
+    current_ci: *mut CallInfo,
+
     /// Open upvalues - upvalues pointing to stack locations
     /// Sorted Vec (higher stack indices first) for efficient lookup and close traversal.
     /// Linear scan is faster than HashMap for typical 0-5 open upvalues due to
@@ -216,6 +220,7 @@ impl LuaState {
             call_stack: Vec::with_capacity(call_stack_size),
             call_stack_storage: Vec::with_capacity(call_stack_size),
             call_depth: 0,
+            current_ci: std::ptr::null_mut(),
             open_upvalues_list: Vec::new(),
             yield_values: Vec::new(),
             allow_hook: true,
@@ -304,6 +309,7 @@ impl LuaState {
     #[inline]
     pub(crate) fn release_ci(&mut self) {
         self.call_depth = 0;
+        self.current_ci = std::ptr::null_mut();
         self.call_stack.clear();
         self.call_stack_storage.clear();
     }
@@ -425,6 +431,7 @@ impl LuaState {
         let ci = self.acquire_call_info_slot();
         self.init_call_info(ci, init);
 
+        self.current_ci = ci;
         self.call_depth += 1;
 
         // Match Lua 5.5's luaD_precall: L->top.p = ci->top.p
@@ -470,6 +477,7 @@ impl LuaState {
         let init = FrameInit::lua(base, nresults, max_stack_size, chunk_ptr, upvalue_ptrs, 0);
         self.init_call_info(ci, init);
 
+        self.current_ci = ci;
         self.call_depth += 1;
         if self.stack_top < frame_top {
             self.stack_top = frame_top;
@@ -501,26 +509,28 @@ impl LuaState {
         // stack already large enough, call_stack slot available for reuse.
         // Covers exact match AND extra args (common in metamethods like __len
         // which receives 2 args but declares 1 param).
-        if nparams >= param_count && frame_top + EXTRA_STACK <= self.stack.len() {
-            if let Some(ci) = self.try_acquire_call_info_slot() {
-                let init = FrameInit::lua(
-                    base,
-                    nresults,
-                    max_stack_size,
-                    chunk_ptr,
-                    upvalue_ptrs,
-                    (nparams - param_count) as i32,
-                );
-                self.init_call_info(ci, init);
+        if nparams >= param_count
+            && frame_top + EXTRA_STACK <= self.stack.len()
+            && let Some(ci) = self.try_acquire_call_info_slot()
+        {
+            let init = FrameInit::lua(
+                base,
+                nresults,
+                max_stack_size,
+                chunk_ptr,
+                upvalue_ptrs,
+                (nparams - param_count) as i32,
+            );
+            self.init_call_info(ci, init);
 
-                self.call_depth += 1;
+            self.current_ci = ci;
+            self.call_depth += 1;
 
-                if self.stack_top < frame_top {
-                    self.stack_top = frame_top;
-                }
-
-                return Ok(());
+            if self.stack_top < frame_top {
+                self.stack_top = frame_top;
             }
+
+            return Ok(());
         }
 
         // Slow path: handle extra args, nil filling, stack resize, new slot allocation
@@ -605,6 +615,7 @@ impl LuaState {
         let ci = self.acquire_call_info_slot();
         self.init_call_info(ci, init);
 
+        self.current_ci = ci;
         self.call_depth += 1;
 
         if self.stack_top < frame_top {
@@ -646,6 +657,7 @@ impl LuaState {
         let ci = self.acquire_call_info_slot();
         self.init_call_info(ci, init);
 
+        self.current_ci = ci;
         self.call_depth += 1;
 
         if self.stack_top < frame_top {
@@ -659,7 +671,9 @@ impl LuaState {
     #[inline(always)]
     pub(crate) fn pop_frame(&mut self) {
         if self.call_depth > 0 {
+            let previous = unsafe { (*self.current_ci).previous };
             self.call_depth -= 1;
+            self.current_ci = previous;
         }
     }
 
@@ -668,7 +682,9 @@ impl LuaState {
     #[inline(always)]
     pub(crate) fn pop_c_frame(&mut self) {
         debug_assert!(self.call_depth > 0);
+        let previous = unsafe { (*self.current_ci).previous };
         self.call_depth -= 1;
+        self.current_ci = previous;
     }
 
     /// Get logical stack top (L->top.p in Lua source)
@@ -806,11 +822,7 @@ impl LuaState {
     #[inline(always)]
     fn init_call_info(&self, ci: *mut CallInfo, init: FrameInit) {
         let base_stk = self.ci_base_stk(init.base);
-        let previous = if self.call_depth > 0 {
-            unsafe { self.call_stack.get_unchecked(self.call_depth - 1).as_ptr() }
-        } else {
-            std::ptr::null_mut()
-        };
+        let previous = self.current_ci;
         unsafe {
             let ci_ref = &mut *ci;
             ci_ref.base = init.base;
@@ -826,7 +838,6 @@ impl LuaState {
             ci_ref.aux_i32 = -1;
         }
     }
-
 
     fn fix_call_info_base_stk(&mut self) {
         let sp = self.stack.as_mut_ptr();
@@ -1943,6 +1954,11 @@ impl LuaState {
         unsafe { self.call_stack.get_unchecked(idx).as_ptr() }
     }
 
+    #[inline(always)]
+    pub(crate) fn current_ci_ptr(&self) -> *mut CallInfo {
+        self.current_ci
+    }
+
     /// Get mutable CallInfo by index (unchecked — caller must ensure idx < call_depth)
     #[inline(always)]
     pub(crate) fn get_call_info_mut(&mut self, idx: usize) -> &mut CallInfo {
@@ -1954,7 +1970,9 @@ impl LuaState {
     #[inline(always)]
     pub(crate) fn pop_call_frame(&mut self) {
         debug_assert!(self.call_depth > 0);
+        let previous = unsafe { (*self.current_ci).previous };
         self.call_depth -= 1;
+        self.current_ci = previous;
     }
 
     /// Get return values from stack

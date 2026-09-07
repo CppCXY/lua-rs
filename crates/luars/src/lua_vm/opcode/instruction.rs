@@ -104,7 +104,7 @@ impl Instruction {
     pub fn get_opcode(self) -> OpCode {
         // `self.0 & MAX_OP` is already limited to the valid 7-bit opcode
         // space, so the extra branch in `from_u8` is redundant here.
-        unsafe { OpCode::from_u8_unchecked((self.0 & Self::MAX_OP) as u8) }
+        OpCode::from_u8_unchecked((self.0 & Self::MAX_OP) as u8)
     }
 
     #[inline(always)]

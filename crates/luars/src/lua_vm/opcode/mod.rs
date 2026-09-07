@@ -231,7 +231,7 @@ impl OpCode {
     /// # Safety: `byte` must be a valid opcode discriminant in `0..=127`.
     /// Bytecode produced by this compiler only ever contains valid opcodes.
     #[inline(always)]
-    pub unsafe fn from_u8_unchecked(byte: u8) -> Self {
+    pub fn from_u8_unchecked(byte: u8) -> Self {
         debug_assert!(byte <= 127);
         unsafe { std::mem::transmute::<u8, OpCode>(byte) }
     }

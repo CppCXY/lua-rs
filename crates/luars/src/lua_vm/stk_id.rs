@@ -18,6 +18,7 @@ use crate::{
 
 /// Stack slot handle — a raw pointer wrapped for safe(er) access.
 #[derive(Clone, Copy)]
+#[repr(transparent)]
 pub struct StkId(*mut LuaValue);
 
 impl StkId {

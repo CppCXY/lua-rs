@@ -86,8 +86,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             return Ok(());
         }
 
-        let frame_idx = current_depth - 1;
-        let ci_ptr = lua_state.get_call_info_ptr(frame_idx);
+        let ci_ptr = lua_state.current_ci_ptr();
+        debug_assert!(!ci_ptr.is_null());
         let mut ci = unsafe { &mut *ci_ptr };
         if ci.call_status & (CIST_C | CIST_PENDING_FINISH) != 0
             && handle_pending_ops(lua_state, ci)?
@@ -147,8 +147,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // Still need: hook_on_call for new function entry.
         macro_rules! reload_after_call {
             () => {
-                let frame_idx = lua_state.call_depth() - 1;
-                let ci_ptr = lua_state.get_call_info_ptr(frame_idx);
+                let ci_ptr = lua_state.current_ci_ptr();
+                debug_assert!(!ci_ptr.is_null());
                 ci = unsafe { &mut *ci_ptr };
                 base_stk = ci.base_stk;
                 pc = 0;
