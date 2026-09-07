@@ -213,31 +213,55 @@ fn tointeger_mode(v: &LuaValue, mode: i32) -> Option<i64> {
 ///
 /// Optimized hot path: inline fasttm check for __index to avoid function call overhead.
 /// Matches Lua 5.5's luaV_finishget pattern.
-fn finishget_inner(
+/// Single core for __index chain resolution.
+///
+/// Writes the resolved value into `dest_stk_id` and returns `true` when a value
+/// was found. Returns `false` only for the "table has no __index" case, after
+/// writing nil (matching Lua C's `luaV_finishget`).
+fn finishget_core(
     lua_state: &mut LuaState,
     obj: &LuaValue,
     key: &LuaValue,
+    dest_stk_id: StkId,
     skip_first_raw_lookup: bool,
-) -> LuaResult<Option<LuaValue>> {
+) -> LuaResult<bool> {
+    const TM_INDEX_BIT: u8 = TmKind::Index as u8;
+
     let mut t = *obj;
     let mut skip_raw_lookup = skip_first_raw_lookup;
 
     for _ in 0..MAXTAGLOOP {
-        // Inline fasttm for __index on tables (hot path optimization)
         let tm = if let Some(table) = t.as_table_mut() {
             // Try raw_get first — handles key types the caller's fast paths didn't cover
             // (float→int normalization, long strings, etc.)
             if !skip_raw_lookup {
                 if let Some(val) = table.raw_get(key) {
-                    return Ok(Some(val));
+                    dest_stk_id.write(&val);
+                    return Ok(true);
                 }
             } else {
                 skip_raw_lookup = false;
             }
 
-            match get_metamethod_from_meta_ptr(lua_state, table.meta_ptr(), TmKind::Index) {
+            let meta = table.meta_ptr();
+            if meta.is_null() {
+                dest_stk_id.set_nil();
+                return Ok(false);
+            }
+            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+            if mt.no_tm(TM_INDEX_BIT) {
+                dest_stk_id.set_nil();
+                return Ok(false);
+            }
+            let vm = lua_state.global_state_mut();
+            let event_key = vm.const_strings.get_tm_value(TmKind::Index);
+            match mt.impl_table.get_shortstr_fast(&event_key) {
                 Some(v) => v,
-                None => return Ok(None),
+                None => {
+                    mt.set_tm_absent(TM_INDEX_BIT);
+                    dest_stk_id.set_nil();
+                    return Ok(false);
+                }
             }
         } else {
             // Non-table (string, userdata): check trait-based field access first
@@ -246,36 +270,34 @@ fn finishget_inner(
             {
                 let token = ud.sub_guard_token();
                 let trait_obj = ud.get_trait()?;
-                // Try trait-based get_field (key must be a string)
                 if let Some(key_str) = key.as_str()
                     && let Some(udv) = trait_obj.get_field(key_str)
                 {
                     let result = udvalue_to_lua_value_with_token(lua_state, udv, token)?;
-                    return Ok(Some(result));
+                    dest_stk_id.write(&result);
+                    return Ok(true);
                 }
             }
             // Fall back to general metamethod path
             match get_metamethod_event(lua_state, &t, TmKind::Index) {
                 Some(tm) => tm,
                 None => {
-                    // No __index metamethod on non-table value → error
-                    // Use typeerror for enhanced error message with varinfo
                     return Err(typeerror(lua_state, &t, "index"));
                 }
             }
         };
 
-        // If __index is a function, call it using call_tm_res
+        // If __index is a function, call it using call_tm_res_into.
         if tm.is_function() {
-            let result = call_tm_res(lua_state, tm, t, *key)?;
-            return Ok(Some(result));
+            call_tm_res_into(lua_state, tm, t, *key, dest_stk_id)?;
+            return Ok(true);
         }
 
-        // __index is a table, try to access tm[key] directly
+        // __index is a table, try to access tm[key] directly.
         t = tm;
 
         if let Some(table) = t.as_table() {
-            // Use fast_geti for integer keys to avoid raw_get's float normalization
+            // Use fast_geti for integer keys to avoid raw_get's float normalization.
             let value = if key.ttisinteger() {
                 table.impl_table.fast_geti(key.ivalue())
             } else if key.is_short_string() {
@@ -284,15 +306,15 @@ fn finishget_inner(
                 table.raw_get(key)
             };
             if let Some(value) = value {
-                return Ok(Some(value));
+                dest_stk_id.write(&value);
+                return Ok(true);
             }
             skip_raw_lookup = true;
         }
 
-        // If not found, loop again to check if tm has __index
+        // If not found, loop again to check if tm has __index.
     }
 
-    // Too many iterations - possible loop
     Err(lua_state.error("'__index' chain too long; possible loop".to_string()))
 }
 
@@ -301,7 +323,13 @@ pub fn finishget(
     obj: &LuaValue,
     key: &LuaValue,
 ) -> LuaResult<Option<LuaValue>> {
-    finishget_inner(lua_state, obj, key, false)
+    let mut value = LuaValue::nil();
+    let dest = StkId::from_mut_ptr(&mut value);
+    if finishget_core(lua_state, obj, key, dest, false)? {
+        Ok(Some(value))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Get a metamethod from a metatable value — implements Lua 5.5's fasttm/luaT_gettm pattern.
@@ -484,11 +512,18 @@ pub(crate) fn finishset(
     Err(lua_state.error("'__newindex' chain too long; possible loop".to_string()))
 }
 
+#[inline]
 pub fn get_metamethod_event(
     lua_state: &mut LuaState,
     value: &LuaValue,
     tm_kind: TmKind,
 ) -> Option<LuaValue> {
+    // Direct table fast path: mirror C Lua's `luaT_gettmbyobj` for tables.
+    // Avoids constructing a LuaValue for the metatable just to look it up again.
+    if let Some(table) = value.as_table_mut() {
+        return get_metamethod_from_meta_ptr(lua_state, table.meta_ptr(), tm_kind);
+    }
+
     let mt = get_metatable(lua_state, value)?;
     get_metamethod_from_metatable(lua_state, mt, tm_kind)
 }
@@ -1339,103 +1374,14 @@ pub fn self_shortstr_index_chain_fast(
     false
 }
 
-fn finishget_to_reg_inner(
-    lua_state: &mut LuaState,
-    obj: &LuaValue,
-    key: &LuaValue,
-    dest_stk_id: StkId,
-    skip_first_raw_lookup: bool,
-) -> LuaResult<()> {
-    const TM_INDEX_BIT: u8 = TmKind::Index as u8;
-
-    let mut t = *obj;
-    let mut skip_raw_lookup = skip_first_raw_lookup;
-
-    for _ in 0..MAXTAGLOOP {
-        let tm = if let Some(table) = t.as_table_mut() {
-            if !skip_raw_lookup {
-                if let Some(val) = table.raw_get(key) {
-                    dest_stk_id.write(&val);
-                    return Ok(());
-                }
-            } else {
-                skip_raw_lookup = false;
-            }
-
-            let meta = table.meta_ptr();
-            if meta.is_null() {
-                dest_stk_id.set_nil();
-                return Ok(());
-            }
-            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
-            if mt.no_tm(TM_INDEX_BIT) {
-                dest_stk_id.set_nil();
-                return Ok(());
-            }
-            let vm = lua_state.global_state_mut();
-            let event_key = vm.const_strings.get_tm_value(TmKind::Index);
-            match mt.impl_table.get_shortstr_fast(&event_key) {
-                Some(v) => v,
-                None => {
-                    mt.set_tm_absent(TM_INDEX_BIT);
-                    dest_stk_id.set_nil();
-                    return Ok(());
-                }
-            }
-        } else {
-            if t.ttisfulluserdata()
-                && let Some(ud) = t.as_userdata_mut()
-            {
-                let token = ud.sub_guard_token();
-                let trait_obj = ud.get_trait()?;
-                if let Some(key_str) = key.as_str()
-                    && let Some(udv) = trait_obj.get_field(key_str)
-                {
-                    let result = udvalue_to_lua_value_with_token(lua_state, udv, token)?;
-                    dest_stk_id.write(&result);
-                    return Ok(());
-                }
-            }
-
-            match get_metamethod_event(lua_state, &t, TmKind::Index) {
-                Some(tm) => tm,
-                None => {
-                    return Err(typeerror(lua_state, &t, "index"));
-                }
-            }
-        };
-
-        if tm.is_function() {
-            return call_tm_res_into(lua_state, tm, t, *key, dest_stk_id);
-        }
-
-        t = tm;
-        if let Some(table) = t.as_table() {
-            let value = if key.ttisinteger() {
-                table.impl_table.fast_geti(key.ivalue())
-            } else if key.is_short_string() {
-                table.impl_table.get_shortstr_fast(key)
-            } else {
-                table.raw_get(key)
-            };
-            if let Some(value) = value {
-                dest_stk_id.write(&value);
-                return Ok(());
-            }
-            skip_raw_lookup = true;
-        }
-    }
-
-    Err(lua_state.error("'__index' chain too long; possible loop".to_string()))
-}
-
 fn finishget_to_reg_known_miss(
     lua_state: &mut LuaState,
     obj: &LuaValue,
     key: &LuaValue,
     dest_stk_id: StkId,
 ) -> LuaResult<()> {
-    finishget_to_reg_inner(lua_state, obj, key, dest_stk_id, true)
+    finishget_core(lua_state, obj, key, dest_stk_id, true)?;
+    Ok(())
 }
 
 /// finishset wrapper for SetTabUp/SetTable/SetI/SetField
