@@ -2033,7 +2033,7 @@ impl LuaState {
             return None;
         }
 
-        let frame = &self.call_stack[self.call_depth - 1];
+        let frame = unsafe { &*self.current_ci };
         let base = frame.base;
         let top = frame.top as usize;
 
