@@ -212,7 +212,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 base_stk = ci.base_stk;
             }
 
-            match instr.get_opcode_unchecked() {
+            match instr.get_opcode() {
                 OpCode::Move => {
                     // R[A] := R[B]
                     let a = instr.get_a() as usize;
