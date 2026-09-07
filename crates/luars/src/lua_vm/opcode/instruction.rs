@@ -105,6 +105,16 @@ impl Instruction {
         OpCode::from_u8((self.0 & Self::MAX_OP) as u8)
     }
 
+    /// Unchecked opcode decoding for the hot interpreter dispatch.
+    ///
+    /// SAFETY: the stored opcode must be valid (`<= ExtraArg`, i.e. within
+    /// the 7-bit opcode space). Bytecode produced by this compiler only
+    /// ever contains valid opcodes.
+    #[inline(always)]
+    pub fn get_opcode_unchecked(self) -> OpCode {
+        unsafe { OpCode::from_u8_unchecked((self.0 & Self::MAX_OP) as u8) }
+    }
+
     #[inline(always)]
     pub fn get_a(self) -> u32 {
         (self.0 >> Self::POS_A) & Self::MAX_A

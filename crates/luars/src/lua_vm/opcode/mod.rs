@@ -168,7 +168,51 @@ pub enum OpCode {
     // Extra argument for previous instruction
     ExtraArg, // Ax       extra (larger) argument for previous opcode
 
-    None = 255, // Sentinel value for invalid opcode
+    // Reserved opcodes fill the remaining 7-bit space so the hot dispatch
+    // table can cover 0..=127 without a per-instruction range check.
+    Reserved85,  // reserved (never emitted by the compiler)
+    Reserved86,  // reserved (never emitted by the compiler)
+    Reserved87,  // reserved (never emitted by the compiler)
+    Reserved88,  // reserved (never emitted by the compiler)
+    Reserved89,  // reserved (never emitted by the compiler)
+    Reserved90,  // reserved (never emitted by the compiler)
+    Reserved91,  // reserved (never emitted by the compiler)
+    Reserved92,  // reserved (never emitted by the compiler)
+    Reserved93,  // reserved (never emitted by the compiler)
+    Reserved94,  // reserved (never emitted by the compiler)
+    Reserved95,  // reserved (never emitted by the compiler)
+    Reserved96,  // reserved (never emitted by the compiler)
+    Reserved97,  // reserved (never emitted by the compiler)
+    Reserved98,  // reserved (never emitted by the compiler)
+    Reserved99,  // reserved (never emitted by the compiler)
+    Reserved100, // reserved (never emitted by the compiler)
+    Reserved101, // reserved (never emitted by the compiler)
+    Reserved102, // reserved (never emitted by the compiler)
+    Reserved103, // reserved (never emitted by the compiler)
+    Reserved104, // reserved (never emitted by the compiler)
+    Reserved105, // reserved (never emitted by the compiler)
+    Reserved106, // reserved (never emitted by the compiler)
+    Reserved107, // reserved (never emitted by the compiler)
+    Reserved108, // reserved (never emitted by the compiler)
+    Reserved109, // reserved (never emitted by the compiler)
+    Reserved110, // reserved (never emitted by the compiler)
+    Reserved111, // reserved (never emitted by the compiler)
+    Reserved112, // reserved (never emitted by the compiler)
+    Reserved113, // reserved (never emitted by the compiler)
+    Reserved114, // reserved (never emitted by the compiler)
+    Reserved115, // reserved (never emitted by the compiler)
+    Reserved116, // reserved (never emitted by the compiler)
+    Reserved117, // reserved (never emitted by the compiler)
+    Reserved118, // reserved (never emitted by the compiler)
+    Reserved119, // reserved (never emitted by the compiler)
+    Reserved120, // reserved (never emitted by the compiler)
+    Reserved121, // reserved (never emitted by the compiler)
+    Reserved122, // reserved (never emitted by the compiler)
+    Reserved123, // reserved (never emitted by the compiler)
+    Reserved124, // reserved (never emitted by the compiler)
+    Reserved125, // reserved (never emitted by the compiler)
+    Reserved126, // reserved (never emitted by the compiler)
+    Reserved127, // reserved (never emitted by the compiler)
 }
 
 impl OpCode {
@@ -178,8 +222,18 @@ impl OpCode {
             // SAFETY: We check that the byte is within the valid range of opcodes before transmuting
             unsafe { std::mem::transmute::<u8, OpCode>(byte) }
         } else {
-            OpCode::None
+            OpCode::Reserved127
         }
+    }
+
+    /// Unchecked opcode decoding for the hot interpreter dispatch.
+    ///
+    /// SAFETY: `byte` must be a valid opcode discriminant in `0..=127`.
+    /// Bytecode produced by this compiler only ever contains valid opcodes.
+    #[inline(always)]
+    pub unsafe fn from_u8_unchecked(byte: u8) -> Self {
+        debug_assert!(byte <= 127);
+        unsafe { std::mem::transmute::<u8, OpCode>(byte) }
     }
 
     /// Check if instruction uses "top" (IT mode - In Top)

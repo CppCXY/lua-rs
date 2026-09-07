@@ -212,7 +212,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 base_stk = ci.base_stk;
             }
 
-            match instr.get_opcode() {
+            match instr.get_opcode_unchecked() {
                 OpCode::Move => {
                     // R[A] := R[B]
                     let a = instr.get_a() as usize;
@@ -1525,6 +1525,49 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
                 }
+                OpCode::Reserved85 => unreachable!(),
+                OpCode::Reserved86 => unreachable!(),
+                OpCode::Reserved87 => unreachable!(),
+                OpCode::Reserved88 => unreachable!(),
+                OpCode::Reserved89 => unreachable!(),
+                OpCode::Reserved90 => unreachable!(),
+                OpCode::Reserved91 => unreachable!(),
+                OpCode::Reserved92 => unreachable!(),
+                OpCode::Reserved93 => unreachable!(),
+                OpCode::Reserved94 => unreachable!(),
+                OpCode::Reserved95 => unreachable!(),
+                OpCode::Reserved96 => unreachable!(),
+                OpCode::Reserved97 => unreachable!(),
+                OpCode::Reserved98 => unreachable!(),
+                OpCode::Reserved99 => unreachable!(),
+                OpCode::Reserved100 => unreachable!(),
+                OpCode::Reserved101 => unreachable!(),
+                OpCode::Reserved102 => unreachable!(),
+                OpCode::Reserved103 => unreachable!(),
+                OpCode::Reserved104 => unreachable!(),
+                OpCode::Reserved105 => unreachable!(),
+                OpCode::Reserved106 => unreachable!(),
+                OpCode::Reserved107 => unreachable!(),
+                OpCode::Reserved108 => unreachable!(),
+                OpCode::Reserved109 => unreachable!(),
+                OpCode::Reserved110 => unreachable!(),
+                OpCode::Reserved111 => unreachable!(),
+                OpCode::Reserved112 => unreachable!(),
+                OpCode::Reserved113 => unreachable!(),
+                OpCode::Reserved114 => unreachable!(),
+                OpCode::Reserved115 => unreachable!(),
+                OpCode::Reserved116 => unreachable!(),
+                OpCode::Reserved117 => unreachable!(),
+                OpCode::Reserved118 => unreachable!(),
+                OpCode::Reserved119 => unreachable!(),
+                OpCode::Reserved120 => unreachable!(),
+                OpCode::Reserved121 => unreachable!(),
+                OpCode::Reserved122 => unreachable!(),
+                OpCode::Reserved123 => unreachable!(),
+                OpCode::Reserved124 => unreachable!(),
+                OpCode::Reserved125 => unreachable!(),
+                OpCode::Reserved126 => unreachable!(),
+                OpCode::Reserved127 => unreachable!(),
                 _ => unreachable!(),
             }
         }
