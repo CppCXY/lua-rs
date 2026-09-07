@@ -126,8 +126,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 if current_depth <= target_depth {
                     return Ok(());
                 }
-                let frame_idx = current_depth - 1;
-                let next_ci_ptr = lua_state.get_call_info_ptr(frame_idx);
+                let next_ci_ptr = ci.previous;
+                debug_assert!(!next_ci_ptr.is_null());
                 ci = unsafe { &mut *next_ci_ptr };
                 if ci.call_status & (CIST_C | CIST_PENDING_FINISH) != 0 {
                     break;

@@ -98,6 +98,11 @@ pub struct CallInfo {
     /// Updated on stack reallocation via `LuaState::fix_call_info_base_stk`.
     pub base_stk: StkId,
 
+    /// Pointer to the caller's `CallInfo`, mirroring C Lua's `previous` link.
+    /// The actual `CallInfo` objects live in stable storage, so this raw
+    /// pointer stays valid for the whole lifetime of the call frame.
+    pub previous: *mut CallInfo,
+
     /// Offset from original base to func position (for vararg functions after buildhiddenargs)
     /// When nextraargs > 0 and buildhiddenargs was called:
     /// - func_offset = totalargs + 1 (the shift amount)
@@ -188,6 +193,7 @@ impl CallInfo {
         Self {
             base,
             base_stk: StkId::from_stack(sp, base),
+            previous: std::ptr::null_mut(),
             chunk_ptr: std::ptr::null(),
             upvalue_ptrs: std::ptr::null(),
             func_offset: 1, // Initially base - 1 = func
@@ -204,6 +210,7 @@ impl CallInfo {
         Self {
             base,
             base_stk: StkId::from_stack(sp, base),
+            previous: std::ptr::null_mut(),
             chunk_ptr: std::ptr::null(),
             upvalue_ptrs: std::ptr::null(),
             func_offset: 1,
@@ -285,6 +292,7 @@ impl Default for CallInfo {
         Self {
             base: 0,
             base_stk: StkId::null(),
+            previous: std::ptr::null_mut(),
             chunk_ptr: std::ptr::null(),
             upvalue_ptrs: std::ptr::null(),
             func_offset: 1,

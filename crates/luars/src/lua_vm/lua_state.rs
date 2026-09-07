@@ -34,6 +34,54 @@ use crate::{
     LuaProto, LuaRegistrable, LuaStringRef, LuaTableRef, RefAliveToken, UserDataRef,
 };
 
+/// Internal description of a call frame to be pushed.
+///
+/// Phase 1 refactor: all push variants build a `FrameInit` and then pass it to
+/// the single `init_call_info` core, instead of each variant writing a full
+/// `CallInfo` literal itself.
+#[derive(Clone, Copy)]
+pub(crate) struct FrameInit {
+    pub(crate) base: usize,
+    pub(crate) frame_top: usize,
+    pub(crate) call_status: u32,
+    pub(crate) nextraargs: i32,
+    pub(crate) chunk_ptr: *const LuaProto,
+    pub(crate) upvalue_ptrs: *const UpvaluePtr,
+}
+
+impl FrameInit {
+    #[inline(always)]
+    pub(crate) fn lua(
+        base: usize,
+        nresults: i32,
+        max_stack_size: usize,
+        chunk_ptr: *const LuaProto,
+        upvalue_ptrs: *const UpvaluePtr,
+        nextraargs: i32,
+    ) -> Self {
+        Self {
+            base,
+            frame_top: base + max_stack_size,
+            call_status: call_status::with_nresults(call_status::CIST_LUA, nresults),
+            nextraargs,
+            chunk_ptr,
+            upvalue_ptrs,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn c(base: usize, nargs: usize, nresults: i32) -> Self {
+        Self {
+            base,
+            frame_top: base + nargs,
+            call_status: call_status::with_nresults(CIST_C, nresults),
+            nextraargs: 0,
+            chunk_ptr: std::ptr::null(),
+            upvalue_ptrs: std::ptr::null(),
+        }
+    }
+}
+
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
 pub struct LuaState {
@@ -225,14 +273,31 @@ impl LuaState {
     }
 
     #[inline(always)]
-    fn alloc_call_info_slot(&mut self, value: CallInfo) -> CallInfoPtr {
+    fn try_acquire_call_info_slot(&mut self) -> Option<*mut CallInfo> {
+        if self.call_depth < self.call_stack.len() {
+            Some(unsafe { self.call_stack.get_unchecked(self.call_depth).as_ptr() })
+        } else {
+            None
+        }
+    }
+
+    /// Returns a reusable `CallInfo` slot, allocating a new stable slot only
+    /// when this call depth has never been reached before.
+    #[inline(always)]
+    fn acquire_call_info_slot(&mut self) -> *mut CallInfo {
+        if let Some(ptr) = self.try_acquire_call_info_slot() {
+            return ptr;
+        }
+
+        let value = CallInfo::default();
         let pooled = self
             .global_state_mut()
             .object_allocator
             .alloc_call_info(value);
-        let ptr = CallInfoPtr::from_mut(unsafe { &mut *pooled.as_mut_ptr() });
+        let ptr = pooled.as_mut_ptr();
         self.call_stack_storage.push(pooled);
-        self.call_stack.push(ptr);
+        self.call_stack
+            .push(CallInfoPtr::from_mut(unsafe { &mut *ptr }));
         ptr
     }
 
@@ -343,36 +408,22 @@ impl LuaState {
             self.resize(needed_physical)?;
         }
 
-        // Fast path: reuse existing CallInfo slot (most common case)
-        if self.call_depth < self.call_stack.len() {
-            let ci = unsafe { self.call_stack[self.call_depth].as_mut() };
-            *ci = CallInfo {
+        let init = if call_status & CIST_C == 0 {
+            FrameInit::lua(
                 base,
-                base_stk: self.ci_base_stk(base),
-                func_offset: 1,
-                top: frame_top as u32,
-                pc: 0,
-                call_status,
+                nresults,
+                maxstacksize,
+                chunk_raw,
+                upvalue_raw,
                 nextraargs,
-                chunk_ptr: chunk_raw,
-                upvalue_ptrs: upvalue_raw,
-                aux_i32: -1,
-            };
+            )
         } else {
-            // Slow path: allocate new stable CallInfo slot (first time reaching this depth)
-            self.alloc_call_info_slot(CallInfo {
-                base,
-                base_stk: self.ci_base_stk(base),
-                func_offset: 1,
-                top: frame_top as u32,
-                pc: 0,
-                call_status,
-                nextraargs,
-                chunk_ptr: chunk_raw,
-                upvalue_ptrs: upvalue_raw,
-                aux_i32: -1,
-            });
-        }
+            FrameInit::c(base, nparams, nresults)
+        };
+
+        // Acquire a stable CallInfo slot (reuse when possible, allocate on first depth).
+        let ci = self.acquire_call_info_slot();
+        self.init_call_info(ci, init);
 
         self.call_depth += 1;
 
@@ -407,23 +458,17 @@ impl LuaState {
         }
 
         let frame_top = base + max_stack_size;
-        if frame_top + EXTRA_STACK > self.stack.len() || self.call_depth >= self.call_stack.len() {
+        if frame_top + EXTRA_STACK > self.stack.len() {
             return Ok(false);
         }
 
-        let ci = unsafe { self.call_stack.get_unchecked(self.call_depth).as_mut() };
-        *ci = CallInfo {
-            base,
-            base_stk: self.ci_base_stk(base),
-            func_offset: 1,
-            top: frame_top as u32,
-            pc: 0,
-            call_status: call_status::with_nresults(call_status::CIST_LUA, nresults),
-            nextraargs: 0,
-            chunk_ptr,
-            upvalue_ptrs,
-            aux_i32: -1,
+        // Exact fast path intentionally does not allocate a new CallInfo slot;
+        // if no reusable slot exists the caller falls back to the general path.
+        let Some(ci) = self.try_acquire_call_info_slot() else {
+            return Ok(false);
         };
+        let init = FrameInit::lua(base, nresults, max_stack_size, chunk_ptr, upvalue_ptrs, 0);
+        self.init_call_info(ci, init);
 
         self.call_depth += 1;
         if self.stack_top < frame_top {
@@ -456,31 +501,26 @@ impl LuaState {
         // stack already large enough, call_stack slot available for reuse.
         // Covers exact match AND extra args (common in metamethods like __len
         // which receives 2 args but declares 1 param).
-        if nparams >= param_count
-            && frame_top + EXTRA_STACK <= self.stack.len()
-            && self.call_depth < self.call_stack.len()
-        {
-            let ci = unsafe { self.call_stack.get_unchecked(self.call_depth).as_mut() };
-            *ci = CallInfo {
-                base,
-                base_stk: self.ci_base_stk(base),
-                func_offset: 1,
-                top: frame_top as u32,
-                pc: 0,
-                call_status: call_status::with_nresults(call_status::CIST_LUA, nresults),
-                nextraargs: (nparams - param_count) as i32,
-                chunk_ptr,
-                upvalue_ptrs,
-                aux_i32: -1,
-            };
+        if nparams >= param_count && frame_top + EXTRA_STACK <= self.stack.len() {
+            if let Some(ci) = self.try_acquire_call_info_slot() {
+                let init = FrameInit::lua(
+                    base,
+                    nresults,
+                    max_stack_size,
+                    chunk_ptr,
+                    upvalue_ptrs,
+                    (nparams - param_count) as i32,
+                );
+                self.init_call_info(ci, init);
 
-            self.call_depth += 1;
+                self.call_depth += 1;
 
-            if self.stack_top < frame_top {
-                self.stack_top = frame_top;
+                if self.stack_top < frame_top {
+                    self.stack_top = frame_top;
+                }
+
+                return Ok(());
             }
-
-            return Ok(());
         }
 
         // Slow path: handle extra args, nil filling, stack resize, new slot allocation
@@ -521,7 +561,7 @@ impl LuaState {
         nparams: usize,
         nresults: i32,
         param_count: usize,
-        _max_stack_size: usize,
+        max_stack_size: usize,
         frame_top: usize,
         chunk_ptr: *const LuaProto,
         upvalue_ptrs: *const UpvaluePtr,
@@ -553,35 +593,17 @@ impl LuaState {
             self.resize(needed_physical)?;
         }
 
-        // Reuse existing CallInfo slot or allocate new one
-        if self.call_depth < self.call_stack.len() {
-            let ci = unsafe { self.call_stack.get_unchecked(self.call_depth).as_mut() };
-            *ci = CallInfo {
-                base,
-                base_stk: self.ci_base_stk(base),
-                func_offset: 1,
-                top: frame_top as u32,
-                pc: 0,
-                call_status: call_status::with_nresults(call_status::CIST_LUA, nresults),
-                nextraargs,
-                chunk_ptr,
-                upvalue_ptrs,
-                aux_i32: -1,
-            };
-        } else {
-            self.alloc_call_info_slot(CallInfo {
-                base,
-                base_stk: self.ci_base_stk(base),
-                func_offset: 1,
-                top: frame_top as u32,
-                pc: 0,
-                call_status: call_status::with_nresults(call_status::CIST_LUA, nresults),
-                nextraargs,
-                chunk_ptr,
-                upvalue_ptrs,
-                aux_i32: -1,
-            });
-        }
+        // Reuse an existing CallInfo slot or allocate a new stable one.
+        let init = FrameInit::lua(
+            base,
+            nresults,
+            max_stack_size,
+            chunk_ptr,
+            upvalue_ptrs,
+            nextraargs,
+        );
+        let ci = self.acquire_call_info_slot();
+        self.init_call_info(ci, init);
 
         self.call_depth += 1;
 
@@ -619,35 +641,10 @@ impl LuaState {
             self.resize(needed_physical)?;
         }
 
-        // Reuse existing CallInfo slot or allocate
-        if self.call_depth < self.call_stack.len() {
-            let ci = unsafe { self.call_stack.get_unchecked(self.call_depth).as_mut() };
-            *ci = CallInfo {
-                base,
-                base_stk: self.ci_base_stk(base),
-                chunk_ptr: std::ptr::null(),
-                upvalue_ptrs: std::ptr::null(),
-                func_offset: 1,
-                top: frame_top as u32,
-                pc: 0,
-                call_status: call_status::with_nresults(CIST_C, nresults),
-                nextraargs: 0,
-                aux_i32: -1,
-            };
-        } else {
-            self.alloc_call_info_slot(CallInfo {
-                base,
-                base_stk: self.ci_base_stk(base),
-                chunk_ptr: std::ptr::null(),
-                upvalue_ptrs: std::ptr::null(),
-                func_offset: 1,
-                top: frame_top as u32,
-                pc: 0,
-                call_status: call_status::with_nresults(CIST_C, nresults),
-                nextraargs: 0,
-                aux_i32: -1,
-            });
-        }
+        // Reuse an existing CallInfo slot or allocate a new stable one.
+        let init = FrameInit::c(base, nargs, nresults);
+        let ci = self.acquire_call_info_slot();
+        self.init_call_info(ci, init);
 
         self.call_depth += 1;
 
@@ -801,6 +798,35 @@ impl LuaState {
     fn ci_base_stk(&self, base: usize) -> StkId {
         StkId::from_stack(self.stack.as_ptr() as *mut LuaValue, base)
     }
+
+    /// Single place that initializes a `CallInfo` from a `FrameInit`.
+    ///
+    /// This is the Phase 1 convergence point: every push variant should build
+    /// a `FrameInit` and call this instead of writing `CallInfo` literals.
+    #[inline(always)]
+    fn init_call_info(&self, ci: *mut CallInfo, init: FrameInit) {
+        let base_stk = self.ci_base_stk(init.base);
+        let previous = if self.call_depth > 0 {
+            unsafe { self.call_stack.get_unchecked(self.call_depth - 1).as_ptr() }
+        } else {
+            std::ptr::null_mut()
+        };
+        unsafe {
+            let ci_ref = &mut *ci;
+            ci_ref.base = init.base;
+            ci_ref.base_stk = base_stk;
+            ci_ref.previous = previous;
+            ci_ref.func_offset = 1;
+            ci_ref.top = init.frame_top as u32;
+            ci_ref.pc = 0;
+            ci_ref.call_status = init.call_status;
+            ci_ref.nextraargs = init.nextraargs;
+            ci_ref.chunk_ptr = init.chunk_ptr;
+            ci_ref.upvalue_ptrs = init.upvalue_ptrs;
+            ci_ref.aux_i32 = -1;
+        }
+    }
+
 
     fn fix_call_info_base_stk(&mut self) {
         let sp = self.stack.as_mut_ptr();
