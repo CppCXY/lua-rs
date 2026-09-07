@@ -10,6 +10,7 @@ serde = ["luars/serde"]
 [dependencies]
 luars.workspace = true
 luars_debugger.workspace = true
+mimalloc.workspace = true
 
 [[bin]]
 name = "lua"
