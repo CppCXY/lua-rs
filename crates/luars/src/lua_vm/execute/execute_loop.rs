@@ -702,7 +702,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // HOT PATH: inline table length for no-metatable case
                     let a = instr.get_a();
                     let b = instr.get_b();
-                    let rb = base_stk.offset(b as usize).get();
+                    let rb = base_stk.offset(b as usize).get_ref();
                     savestate!();
                     objlen(lua_state, ci, base_stk.offset(a as usize), rb)?;
                     syncbase!();

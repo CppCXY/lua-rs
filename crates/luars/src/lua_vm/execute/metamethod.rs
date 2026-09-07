@@ -242,10 +242,7 @@ pub fn call_tm_res(
     // Sync top to ci_top — callers in the inline hot path already did set_top_raw(ci_top),
     // so the comparison is almost always true. We still check for safety in other callers.
     let func_pos = {
-        let ci_top = lua_state
-            .current_frame()
-            .expect("metamethod call requires an active call frame")
-            .top as usize;
+        let ci_top = unsafe { (*lua_state.current_ci_ptr()).top as usize };
         let top = lua_state.get_top();
         if top != ci_top {
             lua_state.set_top_raw(ci_top);
@@ -265,9 +262,7 @@ pub fn call_tm_res(
 
     // Call the metamethod with nresults=1
     if metamethod.is_lua_function() {
-        let lua_func = metamethod
-            .as_lua_function()
-            .expect("call_tmres checked lua function type before access");
+        let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
         let upvalue_ptrs = lua_func.upvalues().as_ptr();
 
@@ -315,10 +310,7 @@ pub fn call_tm_res1(
     arg1: LuaValue,
 ) -> LuaResult<LuaValue> {
     let func_pos = {
-        let ci_top = lua_state
-            .current_frame()
-            .expect("metamethod call requires an active call frame")
-            .top as usize;
+        let ci_top = unsafe { (*lua_state.current_ci_ptr()).top as usize };
         let top = lua_state.get_top();
         if top != ci_top {
             lua_state.set_top_raw(ci_top);
@@ -334,9 +326,7 @@ pub fn call_tm_res1(
     lua_state.set_top_raw(func_pos + 2);
 
     if metamethod.is_lua_function() {
-        let lua_func = metamethod
-            .as_lua_function()
-            .expect("call_tm_res1 checked lua function type before access");
+        let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
         let upvalue_ptrs = lua_func.upvalues().as_ptr();
 
@@ -378,18 +368,16 @@ pub fn call_tm_res1(
     Ok(result_val)
 }
 
+#[inline]
 pub fn call_tm_res_into(
     lua_state: &mut LuaState,
-    metamethod: LuaValue,
-    arg1: LuaValue,
-    arg2: LuaValue,
+    metamethod: &LuaValue,
+    arg1: &LuaValue,
+    arg2: &LuaValue,
     dest_stk_id: StkId,
 ) -> LuaResult<()> {
     let func_pos = {
-        let ci_top = lua_state
-            .current_frame()
-            .expect("metamethod call requires an active call frame")
-            .top as usize;
+        let ci_top = unsafe { (*lua_state.current_ci_ptr()).top as usize };
         let top = lua_state.get_top();
         if top != ci_top {
             lua_state.set_top_raw(ci_top);
@@ -399,16 +387,14 @@ pub fn call_tm_res_into(
 
     {
         let stack = lua_state.stack_mut();
-        stack[func_pos] = metamethod;
-        stack[func_pos + 1] = arg1;
-        stack[func_pos + 2] = arg2;
+        stack[func_pos] = *metamethod;
+        stack[func_pos + 1] = *arg1;
+        stack[func_pos + 2] = *arg2;
     }
     lua_state.set_top_raw(func_pos + 3);
 
     if metamethod.is_lua_function() {
-        let lua_func = metamethod
-            .as_lua_function()
-            .expect("call_tm_res checked lua function type before access");
+        let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
         let upvalue_ptrs = lua_func.upvalues().as_ptr();
 
@@ -441,7 +427,7 @@ pub fn call_tm_res_into(
     } else if metamethod.is_cfunction() {
         call_c_function(lua_state, func_pos, 2, 1)?;
     } else {
-        return Err(debug::callerror(lua_state, &metamethod));
+        return Err(debug::callerror(lua_state, metamethod));
     }
 
     let result = lua_state.stack()[func_pos];
@@ -477,10 +463,7 @@ pub fn call_tm(
 ) -> LuaResult<()> {
     // Sync top to ci_top
     let func_pos = {
-        let ci_top = lua_state
-            .current_frame()
-            .expect("metamethod call requires an active call frame")
-            .top as usize;
+        let ci_top = unsafe { (*lua_state.current_ci_ptr()).top as usize };
         let top = lua_state.get_top();
         if top != ci_top {
             lua_state.set_top_raw(ci_top);
@@ -500,9 +483,7 @@ pub fn call_tm(
 
     // Call with 0 results (nresults=0)
     if metamethod.is_lua_function() {
-        let lua_func = metamethod
-            .as_lua_function()
-            .expect("call_tm checked lua function type before access");
+        let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
         let upvalue_ptrs = lua_func.upvalues().as_ptr();
 

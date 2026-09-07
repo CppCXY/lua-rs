@@ -308,7 +308,7 @@ impl NativeTable {
     /// Zero-copy short string lookup — writes directly to destination pointer.
     /// Assumes hash is non-empty and key is short string.
     /// Returns true if found and written.
-    #[inline(never)]
+    #[inline]
     pub(crate) fn get_shortstr_into(&self, key: &LuaValue, dest: *mut LuaValue) -> bool {
         let mut node = self.mainposition_string(key);
         let key_ptr = key.string_ptr_raw();
@@ -1350,7 +1350,7 @@ impl NativeTable {
     /// Public so metatable TM lookups can bypass raw_get's float normalization.
     /// OPTIMIZED: Reduced branches in hot loop, pointer-equality for interned strings.
     /// Safe to call on empty hash tables (returns None).
-    #[inline(never)]
+    #[inline]
     pub fn get_shortstr_fast(&self, key: &LuaValue) -> Option<LuaValue> {
         if self.node.is_null() {
             return None;

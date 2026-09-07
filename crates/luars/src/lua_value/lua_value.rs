@@ -870,6 +870,15 @@ impl LuaValue {
         }
     }
 
+    /// Unchecked Lua-function accessor for hot paths where the caller has
+    /// already verified `is_lua_function()`.
+    ///
+    /// SAFETY: `self` must be a Lua function (`ttisluafunction()`).
+    #[inline(always)]
+    pub(crate) unsafe fn as_lua_function_unchecked(&self) -> &LuaRawFunction {
+        &self.gc_function().data
+    }
+
     #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_lua_function_mut(&self) -> Option<&mut LuaRawFunction> {

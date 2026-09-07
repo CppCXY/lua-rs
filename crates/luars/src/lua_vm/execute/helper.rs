@@ -254,8 +254,8 @@ fn finishget_core(
                 return Ok(false);
             }
             let vm = lua_state.global_state_mut();
-            let event_key = vm.const_strings.get_tm_value(TmKind::Index);
-            match mt.impl_table.get_shortstr_fast(&event_key) {
+            let event_key = vm.const_strings.get_tm_ref(TmKind::Index);
+            match mt.impl_table.get_shortstr_fast(event_key) {
                 Some(v) => v,
                 None => {
                     mt.set_tm_absent(TM_INDEX_BIT);
@@ -289,7 +289,7 @@ fn finishget_core(
 
         // If __index is a function, call it using call_tm_res_into.
         if tm.is_function() {
-            call_tm_res_into(lua_state, tm, t, *key, dest_stk_id)?;
+            call_tm_res_into(lua_state, &tm, &t, key, dest_stk_id)?;
             return Ok(true);
         }
 
@@ -363,8 +363,8 @@ pub(crate) fn get_metamethod_from_meta_ptr(
     }
 
     let vm = lua_state.global_state_mut();
-    let event_key = vm.const_strings.get_tm_value(tm_kind);
-    let result = mt.impl_table.get_shortstr_fast(&event_key);
+    let event_key = vm.const_strings.get_tm_ref(tm_kind);
+    let result = mt.impl_table.get_shortstr_fast(event_key);
 
     if result.is_none() {
         mt.set_tm_absent(tm_idx);
@@ -906,15 +906,15 @@ pub fn objlen(
     l: &mut LuaState,
     ci: &mut CallInfo,
     dest_stk_id: StkId,
-    value: LuaValue,
+    value: &LuaValue,
 ) -> LuaResult<()> {
     if let Some(bytes) = value.as_bytes() {
         let len = bytes.len();
         dest_stk_id.set_integer(len as i64);
         return Ok(());
     } else if value.ttistable() {
-        if let Some(tm) = get_metamethod_event(l, &value, TmKind::Len) {
-            return match call_tm_res_into(l, tm, value, value, dest_stk_id) {
+        if let Some(tm) = get_metamethod_event(l, value, TmKind::Len) {
+            return match call_tm_res_into(l, &tm, value, value, dest_stk_id) {
                 Ok(()) => Ok(()),
                 Err(LuaError::Yield) => {
                     let aux = l.offset_of_stk_id(dest_stk_id);
@@ -942,9 +942,9 @@ pub fn objlen(
         }
     }
 
-    let tm = get_metamethod_event(l, &value, TmKind::Len);
+    let tm = get_metamethod_event(l, value, TmKind::Len);
     if let Some(tm) = tm {
-        match call_tm_res_into(l, tm, value, value, dest_stk_id) {
+        match call_tm_res_into(l, &tm, value, value, dest_stk_id) {
             Ok(()) => {}
             Err(LuaError::Yield) => {
                 let aux = l.offset_of_stk_id(dest_stk_id);
@@ -954,7 +954,7 @@ pub fn objlen(
             Err(e) => return Err(e),
         }
     } else {
-        return Err(typeerror(l, &value, "get length of"));
+        return Err(typeerror(l, value, "get length of"));
     }
     Ok(())
 }
@@ -1308,8 +1308,8 @@ pub fn finishget_fallback(
     key: &LuaValue,
     dest_stk_id: StkId,
 ) -> LuaResult<()> {
-    match finishget_to_reg_known_miss(lua_state, obj, key, dest_stk_id) {
-        Ok(()) => Ok(()),
+    match finishget_core(lua_state, obj, key, dest_stk_id, true) {
+        Ok(_) => Ok(()),
         Err(LuaError::Yield) => {
             let aux = lua_state.offset_of_stk_id(dest_stk_id);
             mark_pending_finish(ci, aux);
@@ -1336,7 +1336,7 @@ pub fn self_shortstr_index_chain_fast(
     let event_key = lua_state
         .global_state_mut()
         .const_strings
-        .get_tm_value(TmKind::Index);
+        .get_tm_ref(TmKind::Index);
     let mut current = *obj;
 
     for _ in 0..MAXTAGLOOP {
@@ -1359,7 +1359,7 @@ pub fn self_shortstr_index_chain_fast(
             return false;
         }
 
-        let Some(tm) = mt.impl_table.get_shortstr_fast(&event_key) else {
+        let Some(tm) = mt.impl_table.get_shortstr_fast(event_key) else {
             mt.set_tm_absent(TM_INDEX_BIT);
             return false;
         };
@@ -1372,16 +1372,6 @@ pub fn self_shortstr_index_chain_fast(
     }
 
     false
-}
-
-fn finishget_to_reg_known_miss(
-    lua_state: &mut LuaState,
-    obj: &LuaValue,
-    key: &LuaValue,
-    dest_stk_id: StkId,
-) -> LuaResult<()> {
-    finishget_core(lua_state, obj, key, dest_stk_id, true)?;
-    Ok(())
 }
 
 /// finishset wrapper for SetTabUp/SetTable/SetI/SetField

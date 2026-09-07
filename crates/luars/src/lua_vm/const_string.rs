@@ -234,4 +234,11 @@ impl ConstString {
     pub fn get_tm_value(&self, tm: TmKind) -> LuaValue {
         self.tmname[tm as usize]
     }
+
+    /// Borrowed version of [`get_tm_value`], avoiding a 16-byte `LuaValue` copy
+    /// in metamethod lookup hot paths.
+    #[inline(always)]
+    pub fn get_tm_ref(&self, tm: TmKind) -> &LuaValue {
+        &self.tmname[tm as usize]
+    }
 }
