@@ -52,14 +52,14 @@ jobs:
           ./run_benchmarks.sh --nocolor 2>&1 | tee -a $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: Run Traditional Lua Benchmarks
+      - name: Run Lua-Benchmarks (Linux)
         run: |
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Traditional Lua Benchmark Results - Linux (ubuntu-latest)" >> $GITHUB_STEP_SUMMARY
+          echo "## Lua-Benchmarks Results - Linux (ubuntu-latest)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          chmod +x run_lua_benchmarks.sh
-          ./run_lua_benchmarks.sh --quick 2>&1 | tee -a $GITHUB_STEP_SUMMARY
+          chmod +x Lua-Benchmarks/runbenchmarks.sh
+          NRUNS=1 ./Lua-Benchmarks/runbenchmarks.sh 2>&1 | tee -a $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
   benchmark-windows:
@@ -111,16 +111,15 @@ jobs:
           .\run_benchmarks.ps1 -NoColor 2>&1 | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
           echo '```' >> $env:GITHUB_STEP_SUMMARY
 
-      - name: Run Traditional Lua Benchmarks
+      - name: Run Lua-Benchmarks (Windows)
         shell: pwsh
         run: |
           $env:PATH = "$env:GITHUB_WORKSPACE\lua_bin;$env:PATH"
-          $env:NATIVE_LUA = "$env:GITHUB_WORKSPACE\lua_bin\lua.exe"
           echo "" >> $env:GITHUB_STEP_SUMMARY
-          echo "## Traditional Lua Benchmark Results - Windows (windows-latest)" >> $env:GITHUB_STEP_SUMMARY
+          echo "## Lua-Benchmarks Results - Windows (windows-latest)" >> $env:GITHUB_STEP_SUMMARY
           echo "" >> $env:GITHUB_STEP_SUMMARY
           echo '```' >> $env:GITHUB_STEP_SUMMARY
-          .\run_lua_benchmarks.ps1 -NoColor -Quick 2>&1 | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          .\Lua-Benchmarks\runbenchmarks.ps1 -Nruns 1 -NoPlots -Binaries @("$env:GITHUB_WORKSPACE\lua_bin\lua.exe", "luars") -Output lua_bench_results 2>&1 | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
           echo '```' >> $env:GITHUB_STEP_SUMMARY
 
   benchmark-macos:
@@ -164,12 +163,12 @@ jobs:
           ./run_benchmarks.sh --nocolor 2>&1 | tee -a $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: Run Traditional Lua Benchmarks
+      - name: Run Lua-Benchmarks (macOS)
         run: |
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Traditional Lua Benchmark Results - macOS (macos-latest)" >> $GITHUB_STEP_SUMMARY
+          echo "## Lua-Benchmarks Results - macOS (macos-latest)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          chmod +x run_lua_benchmarks.sh
-          ./run_lua_benchmarks.sh --quick 2>&1 | tee -a $GITHUB_STEP_SUMMARY
+          chmod +x Lua-Benchmarks/runbenchmarks.sh
+          NRUNS=1 ./Lua-Benchmarks/runbenchmarks.sh 2>&1 | tee -a $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
