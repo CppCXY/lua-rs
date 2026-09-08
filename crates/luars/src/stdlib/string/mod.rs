@@ -442,16 +442,26 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     let i_value = l
         .get_arg(2)
         .ok_or_else(|| debug::argerror(l, 2, "number expected"))?;
-    let i = match value_to_integer(&i_value) {
-        Ok(i) => i,
-        Err(msg) => return Err(debug::argerror(l, 2, msg)),
+    let i = if let Some(i) = i_value.as_integer() {
+        i
+    } else {
+        match value_to_integer(&i_value) {
+            Ok(i) => i,
+            Err(msg) => return Err(debug::argerror(l, 2, msg)),
+        }
     };
 
     let j = l
         .get_arg(3)
-        .map(|v| match value_to_integer(&v) {
-            Ok(i) => Ok(i),
-            Err(msg) => Err(debug::argerror(l, 3, msg)),
+        .map(|v| {
+            if let Some(j) = v.as_integer() {
+                Ok(j)
+            } else {
+                match value_to_integer(&v) {
+                    Ok(i) => Ok(i),
+                    Err(msg) => Err(debug::argerror(l, 3, msg)),
+                }
+            }
         })
         .transpose()?
         .unwrap_or(-1);

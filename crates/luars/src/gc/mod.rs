@@ -1215,6 +1215,16 @@ impl GC {
     ///  Lua 5.5 calls cleargraylists which clears ALL gray lists including weak table lists.
     /// This is safe because restartcollection is only called from GCSpause state,
     /// meaning the previous cycle has completely finished (atomic phase cleared weak tables).
+    #[inline]
+    fn mark_byte_string_cache(&mut self, l: &mut LuaState) {
+        let cache = l.global_state().object_allocator.byte_cache_snapshot();
+        for value in &cache {
+            if !value.is_nil() {
+                self.mark_value(l, value);
+            }
+        }
+    }
+
     fn restart_collection(&mut self, l: &mut LuaState) {
         self.stats.collection_count += 1;
 
@@ -1240,6 +1250,9 @@ impl GC {
 
         let global = l.global_state_mut().global;
         self.mark_value(l, &global);
+
+        // Single-byte string cache is a strong root for fast string.sub.
+        self.mark_byte_string_cache(l);
 
         // Mark debug hook function (per-thread, on main thread)
         let hook = l.hook;
@@ -2194,6 +2207,9 @@ impl GC {
 
         let global = l.global_state_mut().global;
         self.mark_value(l, &global);
+
+        // Single-byte string cache is a strong root for fast string.sub.
+        self.mark_byte_string_cache(l);
 
         // Mark debug hook function (per-thread, stored on LuaState)
         let hook = l.hook;

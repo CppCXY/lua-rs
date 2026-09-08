@@ -1,16 +1,10 @@
-use ahash::RandomState;
-
 use crate::LuaValue;
 #[cfg(feature = "shared-proto")]
 use crate::gc::Pooled;
-use crate::gc::{CreateResult, GC, GcObjectOwner, GcString, PagedPool, StringPtr};
+use crate::gc::{CreateResult, GC, GcObjectOwner, GcObjectPtr, GcString, PagedPool, StringPtr};
 use crate::lua_value::{InlineShortString, LuaStrRepr, LuaString};
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 
-const STRING_HASH_SEED_1: u64 = 0x243f_6a88_85a3_08d3;
-const STRING_HASH_SEED_2: u64 = 0x1319_8a2e_0370_7344;
-const STRING_HASH_SEED_3: u64 = 0xa409_3822_299f_31d0;
-const STRING_HASH_SEED_4: u64 = 0x082e_fa98_ec4e_6c89;
 
 #[cfg(feature = "shared-proto")]
 pub fn share_lua_value(value: &mut LuaValue) -> bool {
@@ -52,13 +46,19 @@ impl StringSlot {
     }
 }
 
+const STRCACHE_N: usize = 53;
+const STRCACHE_M: usize = 2;
+
 /// Open-addressed intern table for short strings.
 pub struct StringInterner {
     slots: Vec<StringSlot>,
-    hasher: RandomState,
     /// Number of interned strings
     nuse: usize,
     ndead: usize,
+    /// Lua 5.5 `strcache` equivalent: API-level cache for stable string pointers.
+    api_cache: [[LuaValue; STRCACHE_M]; STRCACHE_N],
+    /// Content cache for all single-byte strings. Used by `string.sub(s,i,i)`.
+    byte_cache: [LuaValue; 256],
 }
 
 impl Default for StringInterner {
@@ -100,14 +100,10 @@ impl StringInterner {
     pub fn new() -> Self {
         Self {
             slots: vec![StringSlot::Empty; Self::INITIAL_SIZE],
-            hasher: RandomState::with_seeds(
-                STRING_HASH_SEED_1,
-                STRING_HASH_SEED_2,
-                STRING_HASH_SEED_3,
-                STRING_HASH_SEED_4,
-            ),
             nuse: 0,
             ndead: 0,
+            api_cache: [[LuaValue::nil(); STRCACHE_M]; STRCACHE_N],
+            byte_cache: [LuaValue::nil(); 256],
         }
     }
 
@@ -213,6 +209,19 @@ impl StringInterner {
             return Ok(LuaValue::longstring(ptr));
         }
 
+        if slen == 1 {
+            let b = bytes[0] as usize;
+            if let Some(sp) = self.byte_cache[b].as_string_ptr() {
+                let gc_str = sp.as_ref();
+                if gc_str.data.as_bytes() == bytes {
+                    if gc_str.header.is_white() {
+                        sp.as_mut_ref().header.make_black();
+                    }
+                    return Ok(self.byte_cache[b]);
+                }
+            }
+        }
+
         let hash = self.hash_bytes(bytes);
 
         if let Ok(index) = self.find_slot(hash, bytes)
@@ -222,19 +231,27 @@ impl StringInterner {
             if gc_str.header.is_white() {
                 ts.as_mut_ref().header.make_black();
             }
-            return Ok(LuaValue::shortstring(ts));
+            let value = LuaValue::shortstring(ts);
+            if slen == 1 {
+                self.byte_cache[bytes[0] as usize] = value;
+            }
+            return Ok(value);
         }
 
         if self.should_grow() {
             self.grow(gc);
         }
-        self.create_short_string(
+        let value = self.create_short_string(
             Self::make_short_string_repr(bytes),
             hash,
             current_white,
             gc,
             string_pool,
-        )
+        )?;
+        if slen == 1 {
+            self.byte_cache[bytes[0] as usize] = value;
+        }
+        Ok(value)
     }
 
     #[inline]
@@ -308,8 +325,68 @@ impl StringInterner {
     }
 
     #[inline(always)]
+    /// Fast deterministic string hash, similar to Lua C's `luaS_hash`.
+    /// ahash's random hasher costs more than it saves for short interned strings.
+    #[inline]
     fn hash_bytes(&self, s: &[u8]) -> u64 {
-        self.hasher.hash_one(s)
+        let mut h = 0xcbf2_9ce4_8422_2325u64 ^ (s.len() as u64);
+        for &b in s {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    #[inline(always)]
+    fn api_cache_index(&self, ptr: *const u8) -> usize {
+        (ptr as usize) % STRCACHE_N
+    }
+
+    #[inline]
+    pub(crate) fn api_cache_get(&self, ptr: *const u8, bytes: &[u8]) -> Option<LuaValue> {
+        let idx = self.api_cache_index(ptr);
+        for value in &self.api_cache[idx] {
+            if let Some(sp) = value.as_string_ptr() {
+                let gc_str = sp.as_ref();
+                if gc_str.data.as_bytes() == bytes {
+                    return Some(*value);
+                }
+            }
+        }
+        None
+    }
+
+    #[inline]
+    pub(crate) fn byte_cache_snapshot(&self) -> [LuaValue; 256] {
+        self.byte_cache
+    }
+
+    #[inline]
+    pub(crate) fn api_cache_put(&mut self, ptr: *const u8, value: LuaValue) {
+        let idx = self.api_cache_index(ptr);
+        let mut new_value = value;
+        for j in 0..STRCACHE_M {
+            let old = self.api_cache[idx][j];
+            self.api_cache[idx][j] = new_value;
+            new_value = old;
+        }
+    }
+
+    #[inline]
+    fn api_cache_remove(&mut self, ptr: StringPtr) {
+        let gc_ptr = GcObjectPtr::from(ptr);
+        for entry in &mut self.api_cache {
+            for value in entry {
+                if value.as_gc_ptr().map(|v| v == gc_ptr).unwrap_or(false) {
+                    *value = LuaValue::nil();
+                }
+            }
+        }
+        for value in &mut self.byte_cache {
+            if value.as_gc_ptr().map(|v| v == gc_ptr).unwrap_or(false) {
+                *value = LuaValue::nil();
+            }
+        }
     }
 
     pub fn remove_dead_intern(&mut self, ptr: StringPtr) {
@@ -320,13 +397,17 @@ impl StringInterner {
 
         loop {
             match self.slots[index] {
-                StringSlot::Empty => return,
+                StringSlot::Empty => {
+                    self.api_cache_remove(ptr);
+                    return;
+                }
                 StringSlot::Tombstone => {}
                 StringSlot::Occupied(candidate) => {
                     if candidate == ptr {
                         self.slots[index] = StringSlot::Tombstone;
                         self.nuse -= 1;
                         self.ndead += 1;
+                        self.api_cache_remove(ptr);
                         return;
                     }
                 }

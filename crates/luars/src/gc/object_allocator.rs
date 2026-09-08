@@ -57,8 +57,20 @@ impl ObjectAllocator {
     /// Create or intern a string (Lua-style with proper hash collision handling)
     ///
     #[inline]
+    pub(crate) fn byte_cache_snapshot(&self) -> [LuaValue; 256] {
+        self.strings.byte_cache_snapshot()
+    }
+
     pub fn create_string(&mut self, gc: &mut GC, s: &str) -> CreateResult {
-        self.strings.intern(s, gc, &mut self.string_pool)
+        // Lua 5.5's `luaS_new` caches by stable C string pointer. Do the same
+        // for Rust `&str`: cache by slice pointer, verify by content.
+        let ptr = s.as_ptr();
+        if let Some(value) = self.strings.api_cache_get(ptr, s.as_bytes()) {
+            return Ok(value);
+        }
+        let value = self.strings.intern(s, gc, &mut self.string_pool)?;
+        self.strings.api_cache_put(ptr, value);
+        Ok(value)
     }
 
     /// Create string from owned String (avoids clone if not already interned)

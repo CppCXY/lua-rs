@@ -30,7 +30,6 @@ unsafe-send = []
 luars-derive.workspace = true
 
 # external
-ahash.workspace = true
 chrono.workspace = true
 itoa.workspace = true
 serde = { version = "1.0", optional = true, features = ["derive"] }

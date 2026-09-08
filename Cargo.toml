@@ -14,7 +14,6 @@ luars-derive = { path = "crates/luars-derive", version = "0.11.1" }
 luars_debugger = { path = "crates/luars_debugger", version = "0.26.2" }
 
 wasm-bindgen = "0.2"
-ahash = "0.8"
 rand = "0.8"
 chrono = "0.4"
 itoa = "1"
