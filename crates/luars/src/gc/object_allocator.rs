@@ -63,13 +63,18 @@ impl ObjectAllocator {
 
     pub fn create_string(&mut self, gc: &mut GC, s: &str) -> CreateResult {
         // Lua 5.5's `luaS_new` caches by stable C string pointer. Do the same
-        // for Rust `&str`: cache by slice pointer, verify by content.
+        // for Rust `&str` only for short strings: short strings are interned by
+        // content, so a stale pointer reuse is harmless. Long strings are not
+        // interned and must never alias each other via the API cache.
+        let use_cache = s.len() <= StringInterner::SHORT_STRING_LIMIT;
         let ptr = s.as_ptr();
-        if let Some(value) = self.strings.api_cache_get(ptr, s.as_bytes()) {
+        if use_cache && let Some(value) = self.strings.api_cache_get(ptr, s.as_bytes()) {
             return Ok(value);
         }
         let value = self.strings.intern(s, gc, &mut self.string_pool)?;
-        self.strings.api_cache_put(ptr, value);
+        if use_cache {
+            self.strings.api_cache_put(ptr, value);
+        }
         Ok(value)
     }
 
