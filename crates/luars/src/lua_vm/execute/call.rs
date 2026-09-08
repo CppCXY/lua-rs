@@ -105,7 +105,6 @@ pub fn resolve_call_chain(
 /// Caller (precall / the dispatch loop) is responsible for setting
 /// `lua_state.oldpc` after this returns — we skip it here to avoid
 /// redundant loads on the hot path.
-#[inline]
 pub fn call_c_function(
     lua_state: &mut LuaState,
     func_idx: usize,
