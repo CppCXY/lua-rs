@@ -394,8 +394,16 @@ impl StringInterner {
         }
     }
 
+    #[inline]
     pub fn remove_dead_intern(&mut self, ptr: StringPtr) {
         let gc_string = ptr.as_ref();
+        // Long strings are not in the intern table nor in the API cache.
+        // Skipping them here matches Lua C, where `luaS_remove` is only
+        // called for short strings, and avoids probing the table for every
+        // collected long string.
+        if !gc_string.data.is_short() {
+            return;
+        }
         let hash = gc_string.data.hash;
         let mut index = self.slot_index(hash);
         let mask = self.size() - 1;
