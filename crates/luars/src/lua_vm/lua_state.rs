@@ -835,7 +835,6 @@ impl LuaState {
             ci_ref.nextraargs = init.nextraargs;
             ci_ref.chunk_ptr = init.chunk_ptr;
             ci_ref.upvalue_ptrs = init.upvalue_ptrs;
-            ci_ref.aux_i32 = -1;
         }
     }
 
