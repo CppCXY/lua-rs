@@ -490,6 +490,14 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
 
     let result_value = if start_byte >= end_byte {
         l.create_bytes(&[])?
+    } else if end_byte == start_byte + 1 {
+        // Hot path for `string.sub(s, i, i)`: use the single-byte cache
+        // directly, avoiding the full intern_bytes entry overhead.
+        let byte = s_bytes[start_byte];
+        match l.global_state().object_allocator.get_byte_string(byte) {
+            Some(value) => value,
+            None => l.create_bytes(&s_bytes[start_byte..end_byte])?,
+        }
     } else if start_byte == 0 && end_byte == s_bytes.len() {
         s_value
     } else {

@@ -5,7 +5,6 @@ use crate::gc::{CreateResult, GC, GcObjectOwner, GcObjectPtr, GcString, PagedPoo
 use crate::lua_value::{InlineShortString, LuaStrRepr, LuaString};
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 
-
 #[cfg(feature = "shared-proto")]
 pub fn share_lua_value(value: &mut LuaValue) -> bool {
     match value.as_string_ptr() {
@@ -359,6 +358,12 @@ impl StringInterner {
     #[inline]
     pub(crate) fn byte_cache_snapshot(&self) -> [LuaValue; 256] {
         self.byte_cache
+    }
+
+    #[inline(always)]
+    pub(crate) fn get_byte_string(&self, byte: u8) -> Option<LuaValue> {
+        let value = self.byte_cache[byte as usize];
+        if value.is_nil() { None } else { Some(value) }
     }
 
     #[inline]

@@ -61,6 +61,11 @@ impl ObjectAllocator {
         self.strings.byte_cache_snapshot()
     }
 
+    #[inline(always)]
+    pub(crate) fn get_byte_string(&self, byte: u8) -> Option<LuaValue> {
+        self.strings.get_byte_string(byte)
+    }
+
     pub fn create_string(&mut self, gc: &mut GC, s: &str) -> CreateResult {
         // Lua 5.5's `luaS_new` caches by stable C string pointer. Do the same
         // for Rust `&str` only for short strings: short strings are interned by
