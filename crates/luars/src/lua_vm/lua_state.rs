@@ -1949,12 +1949,6 @@ impl LuaState {
     }
 
     #[inline(always)]
-    pub(crate) fn get_call_info_ptr(&self, idx: usize) -> *mut CallInfo {
-        debug_assert!(idx < self.call_stack.len());
-        unsafe { self.call_stack.get_unchecked(idx).as_ptr() }
-    }
-
-    #[inline(always)]
     pub(crate) fn current_ci_ptr(&self) -> *mut CallInfo {
         self.current_ci
     }

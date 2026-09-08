@@ -1141,14 +1141,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             ci.save_pc(pc);
                             // Set locals directly — no CallInfo read-back needed
                             chunk = unsafe { &*chunk_ptr };
-                            base_stk =
-                                StkId::from_stack(lua_state.stack_mut().as_mut_ptr(), new_base);
+                            let ci_ptr = lua_state.current_ci_ptr();
+                            ci = unsafe { &mut *ci_ptr };
+                            base_stk = ci.base_stk;
                             pc = 0;
                             code = &chunk.code;
                             constants = &chunk.constants;
-                            let frame_idx = lua_state.call_depth() - 1;
-                            let ci_ptr = lua_state.get_call_info_ptr(frame_idx);
-                            ci = unsafe { &mut *ci_ptr };
                             trap = current_trap(lua_state);
                             if trap {
                                 let hook_mask = lua_state.hook_mask;
