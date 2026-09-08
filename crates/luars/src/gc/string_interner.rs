@@ -371,9 +371,7 @@ impl StringInterner {
         let idx = self.api_cache_index(ptr);
         let mut new_value = value;
         for j in 0..STRCACHE_M {
-            let old = self.api_cache[idx][j];
-            self.api_cache[idx][j] = new_value;
-            new_value = old;
+            std::mem::swap(&mut self.api_cache[idx][j], &mut new_value);
         }
     }
 
