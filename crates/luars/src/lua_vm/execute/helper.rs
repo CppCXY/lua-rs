@@ -236,7 +236,10 @@ fn finishget_core(
             // (float→int normalization, long strings, etc.)
             if !skip_raw_lookup {
                 if key.ttisinteger() {
-                    if table.impl_table.fast_geti_into(key.ivalue(), dest_stk_id.as_ptr()) {
+                    if table
+                        .impl_table
+                        .fast_geti_into(key.ivalue(), dest_stk_id.as_ptr())
+                    {
                         return Ok(true);
                     }
                     if table.impl_table.has_hash()
@@ -248,7 +251,9 @@ fn finishget_core(
                     }
                 } else if key.is_short_string() {
                     if table.impl_table.has_hash()
-                        && table.impl_table.get_shortstr_into(key, dest_stk_id.as_ptr())
+                        && table
+                            .impl_table
+                            .get_shortstr_into(key, dest_stk_id.as_ptr())
                     {
                         return Ok(true);
                     }
@@ -316,7 +321,10 @@ fn finishget_core(
         if let Some(table) = t.as_table() {
             // Direct in-place writes, like C Lua's luaV_fastget.
             let found = if key.ttisinteger() {
-                if table.impl_table.fast_geti_into(key.ivalue(), dest_stk_id.as_ptr()) {
+                if table
+                    .impl_table
+                    .fast_geti_into(key.ivalue(), dest_stk_id.as_ptr())
+                {
                     true
                 } else if table.impl_table.has_hash() {
                     table
@@ -327,7 +335,9 @@ fn finishget_core(
                 }
             } else if key.is_short_string() {
                 table.impl_table.has_hash()
-                    && table.impl_table.get_shortstr_into(key, dest_stk_id.as_ptr())
+                    && table
+                        .impl_table
+                        .get_shortstr_into(key, dest_stk_id.as_ptr())
             } else if let Some(val) = table.raw_get(key) {
                 dest_stk_id.write(&val);
                 true
