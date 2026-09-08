@@ -235,7 +235,24 @@ fn finishget_core(
             // Try raw_get first — handles key types the caller's fast paths didn't cover
             // (float→int normalization, long strings, etc.)
             if !skip_raw_lookup {
-                if let Some(val) = table.raw_get(key) {
+                if key.ttisinteger() {
+                    if table.impl_table.fast_geti_into(key.ivalue(), dest_stk_id.as_ptr()) {
+                        return Ok(true);
+                    }
+                    if table.impl_table.has_hash()
+                        && table
+                            .impl_table
+                            .get_int_from_hash_into(key.ivalue(), dest_stk_id.as_ptr())
+                    {
+                        return Ok(true);
+                    }
+                } else if key.is_short_string() {
+                    if table.impl_table.has_hash()
+                        && table.impl_table.get_shortstr_into(key, dest_stk_id.as_ptr())
+                    {
+                        return Ok(true);
+                    }
+                } else if let Some(val) = table.raw_get(key) {
                     dest_stk_id.write(&val);
                     return Ok(true);
                 }
@@ -297,16 +314,27 @@ fn finishget_core(
         t = tm;
 
         if let Some(table) = t.as_table() {
-            // Use fast_geti for integer keys to avoid raw_get's float normalization.
-            let value = if key.ttisinteger() {
-                table.impl_table.fast_geti(key.ivalue())
+            // Direct in-place writes, like C Lua's luaV_fastget.
+            let found = if key.ttisinteger() {
+                if table.impl_table.fast_geti_into(key.ivalue(), dest_stk_id.as_ptr()) {
+                    true
+                } else if table.impl_table.has_hash() {
+                    table
+                        .impl_table
+                        .get_int_from_hash_into(key.ivalue(), dest_stk_id.as_ptr())
+                } else {
+                    false
+                }
             } else if key.is_short_string() {
-                table.impl_table.get_shortstr_fast(key)
+                table.impl_table.has_hash()
+                    && table.impl_table.get_shortstr_into(key, dest_stk_id.as_ptr())
+            } else if let Some(val) = table.raw_get(key) {
+                dest_stk_id.write(&val);
+                true
             } else {
-                table.raw_get(key)
+                false
             };
-            if let Some(value) = value {
-                dest_stk_id.write(&value);
+            if found {
                 return Ok(true);
             }
             skip_raw_lookup = true;
