@@ -2266,6 +2266,13 @@ impl GC {
         // first clearbyvalues pass.
         self.clear_by_values(l, orig_weak_len, orig_allweak_len);
 
+        // Like Lua 5.5's `luaS_clearcache`: drop API-cache entries that point
+        // to objects about to be collected. Doing this once per atomic phase
+        // avoids scanning the cache for every dead string during sweep.
+        l.global_state_mut()
+            .object_allocator
+            .clear_dead_string_cache();
+
         self.current_white = GcHeader::otherwhite(self.current_white); // Flip current white
 
         // CRITICAL: Close open upvalues on dead threads BEFORE sweep starts.

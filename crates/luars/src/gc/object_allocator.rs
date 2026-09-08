@@ -292,6 +292,13 @@ impl ObjectAllocator {
         self.strings.remove_dead_intern(str_ptr);
     }
 
+    /// Clear API-cache entries whose string is about to be collected.
+    /// Mirrors Lua 5.5's `luaS_clearcache` (called once per atomic phase).
+    #[inline]
+    pub(crate) fn clear_dead_string_cache(&mut self) {
+        self.strings.clear_dead_api_cache();
+    }
+
     pub fn trim_after_full_gc(&mut self) {
         self.table_pool.release_empty_pages();
         self.string_pool.release_empty_pages();

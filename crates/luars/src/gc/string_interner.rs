@@ -1,7 +1,7 @@
 use crate::LuaValue;
 #[cfg(feature = "shared-proto")]
 use crate::gc::Pooled;
-use crate::gc::{CreateResult, GC, GcObjectOwner, GcObjectPtr, GcString, PagedPool, StringPtr};
+use crate::gc::{CreateResult, GC, GcObjectOwner, GcString, PagedPool, StringPtr};
 use crate::lua_value::{InlineShortString, LuaStrRepr, LuaString};
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 
@@ -377,19 +377,18 @@ impl StringInterner {
         }
     }
 
+    /// Clear API-cache entries that point to objects about to be collected.
+    /// This mirrors Lua 5.5's `luaS_clearcache`, which runs once in the
+    /// atomic phase instead of scanning the cache for every dead string.
     #[inline]
-    fn api_cache_remove(&mut self, ptr: StringPtr) {
-        let gc_ptr = GcObjectPtr::from(ptr);
+    pub(crate) fn clear_dead_api_cache(&mut self) {
         for entry in &mut self.api_cache {
             for value in entry {
-                if value.as_gc_ptr().map(|v| v == gc_ptr).unwrap_or(false) {
+                if let Some(sp) = value.as_string_ptr()
+                    && sp.as_ref().header.is_white()
+                {
                     *value = LuaValue::nil();
                 }
-            }
-        }
-        for value in &mut self.byte_cache {
-            if value.as_gc_ptr().map(|v| v == gc_ptr).unwrap_or(false) {
-                *value = LuaValue::nil();
             }
         }
     }
@@ -411,7 +410,6 @@ impl StringInterner {
         loop {
             match self.slots[index] {
                 StringSlot::Empty => {
-                    self.api_cache_remove(ptr);
                     return;
                 }
                 StringSlot::Tombstone => {}
@@ -420,7 +418,6 @@ impl StringInterner {
                         self.slots[index] = StringSlot::Tombstone;
                         self.nuse -= 1;
                         self.ndead += 1;
-                        self.api_cache_remove(ptr);
                         return;
                     }
                 }
