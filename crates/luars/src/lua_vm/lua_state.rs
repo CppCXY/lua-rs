@@ -47,6 +47,9 @@ pub(crate) struct FrameInit {
     pub(crate) nextraargs: i32,
     pub(crate) chunk_ptr: *const LuaProto,
     pub(crate) upvalue_ptrs: *const UpvaluePtr,
+    /// Only vararg Lua frames ever read `CallInfo::nextraargs`.
+    /// C Lua does not reset it on every call; neither do we.
+    pub(crate) write_nextraargs: bool,
 }
 
 impl FrameInit {
@@ -66,6 +69,7 @@ impl FrameInit {
             nextraargs,
             chunk_ptr,
             upvalue_ptrs,
+            write_nextraargs: unsafe { !chunk_ptr.is_null() && (*chunk_ptr).is_vararg },
         }
     }
 
@@ -78,6 +82,7 @@ impl FrameInit {
             nextraargs: 0,
             chunk_ptr: std::ptr::null(),
             upvalue_ptrs: std::ptr::null(),
+            write_nextraargs: false,
         }
     }
 }
@@ -294,7 +299,11 @@ impl LuaState {
             return ptr;
         }
 
-        let value = CallInfo::default();
+        let mut value = CallInfo::default();
+        // CallInfo slots are indexed by call depth and never move. The
+        // previous link for depth `d` is always the slot for depth `d-1`,
+        // so it only needs to be initialized when the slot is created.
+        value.previous = self.current_ci;
         let pooled = self
             .global_state_mut()
             .object_allocator
@@ -822,17 +831,17 @@ impl LuaState {
     #[inline(always)]
     fn init_call_info(&self, ci: *mut CallInfo, init: FrameInit) {
         let base_stk = self.ci_base_stk(init.base);
-        let previous = self.current_ci;
         unsafe {
             let ci_ref = &mut *ci;
             ci_ref.base = init.base;
             ci_ref.base_stk = base_stk;
-            ci_ref.previous = previous;
             ci_ref.func_offset = 1;
             ci_ref.top = init.frame_top as u32;
             ci_ref.pc = 0;
             ci_ref.call_status = init.call_status;
-            ci_ref.nextraargs = init.nextraargs;
+            if init.write_nextraargs {
+                ci_ref.nextraargs = init.nextraargs;
+            }
             ci_ref.chunk_ptr = init.chunk_ptr;
             ci_ref.upvalue_ptrs = init.upvalue_ptrs;
         }
