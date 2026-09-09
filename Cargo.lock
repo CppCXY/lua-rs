@@ -278,7 +278,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "luars"
-version = "0.26.2"
+version = "0.26.3"
 dependencies = [
  "chrono",
  "itoa",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "luars_debugger"
-version = "0.26.2"
+version = "0.26.3"
 dependencies = [
  "luars",
  "serde",
