@@ -317,15 +317,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         code,
                         constants,
                     )?;
-                    continue;
                 }
                 OpCode::GetTable => {
                     table_ops::op_get_table(lua_state, ci, &mut base_stk, pc, &mut trap, instr)?;
-                    continue;
                 }
                 OpCode::GetI => {
                     table_ops::op_get_i(lua_state, ci, &mut base_stk, pc, &mut trap, instr)?;
-                    continue;
                 }
                 OpCode::GetField => {
                     table_ops::op_get_field(
@@ -337,7 +334,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         instr,
                         constants,
                     )?;
-                    continue;
                 }
                 OpCode::SetTabUp => {
                     table_ops::op_set_tabup(
@@ -349,7 +345,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         instr,
                         constants,
                     )?;
-                    continue;
                 }
                 OpCode::SetTable => {
                     table_ops::op_set_table(
@@ -361,7 +356,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         instr,
                         constants,
                     )?;
-                    continue;
                 }
                 OpCode::SetI => {
                     table_ops::op_set_i(
@@ -373,7 +367,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         instr,
                         constants,
                     )?;
-                    continue;
                 }
                 OpCode::SetField => {
                     table_ops::op_set_field(
@@ -385,7 +378,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         instr,
                         constants,
                     )?;
-                    continue;
                 }
                 OpCode::NewTable => {
                     table_ops::op_new_table(
@@ -408,7 +400,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         instr,
                         constants,
                     )?;
-                    continue;
                 }
                 OpCode::Add => {
                     arith::op_arith(
