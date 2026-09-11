@@ -27,7 +27,7 @@ use crate::{
         call_info::call_status::{CIST_C, CIST_CLSRET, CIST_PENDING_FINISH},
         execute::{
             arith::{self, lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr, luai_numpow},
-            call::{poscall, precall, pretailcall},
+            call::{insert_table_call_mm, poscall, precall, pretailcall},
             closure::push_closure,
             concat::{concat, try_concat_pair_utf8},
             helper::{
@@ -1096,16 +1096,36 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let nresults = instr.get_c() as i32 - 1;
                     let func_idx = ci.base + a as usize;
-                    let nargs = if b != 0 {
+                    let mut nargs = if b != 0 {
                         lua_state.set_top_raw(func_idx + b);
                         b - 1
                     } else {
                         lua_state.get_top() - func_idx - 1
                     };
 
+                    // __call 单步解析只对不是 Lua/C 函数的值启用，
+                    // 普通调用的快路径只多一次 tag 判断。
+                    let mut func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+                    let mut ccmt_depth: u8 = 0;
+                    if !func.is_lua_function() && !func.is_c_callable() {
+                        loop {
+                            let v = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+                            if !v.is_table() {
+                                break;
+                            }
+                            match insert_table_call_mm(lua_state, func_idx, nargs, ccmt_depth)? {
+                                Some((_mm, new_nargs)) => {
+                                    nargs = new_nargs;
+                                    ccmt_depth += 1;
+                                }
+                                None => break,
+                            }
+                        }
+                        func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+                    }
+
                     // Fast path: peek at func to inline the exact-match Lua call.
-                    // Avoids the flush→precall→reload round-trip through CallInfo.
-                    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+                    // Avoids the flush->precall->reload round-trip through CallInfo.
                     if func.is_lua_function() {
                         // Extract raw data before borrowing issues
                         let (param_count, max_stack_size, chunk_ptr, new_upvalue_ptrs) = {
@@ -1119,23 +1139,30 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             )
                         };
                         let new_base = func_idx + 1;
+                        // Fast path: exact arg count + reusable CallInfo slot + physical
+                        // stack 有余量。直接写入精简帧并返回 (ci_ptr, base_stk)，
+                        // 省掉 current_ci_ptr()/ci.base_stk 的二次往返。
                         if nargs == param_count
-                            && lua_state.try_push_lua_frame_exact(
+                            && let Some((ci_ptr, new_base_stk)) = lua_state.enter_lua_frame_fast(
                                 new_base,
                                 nresults,
-                                max_stack_size,
+                                new_base + max_stack_size,
                                 chunk_ptr,
                                 new_upvalue_ptrs,
-                            )?
+                            )
                         {
-                            // Save caller state to CallInfo
+                            // Save caller pc before switching frames.
                             ci.save_pc(pc);
-                            // Set locals directly — no CallInfo read-back needed
-                            chunk = unsafe { &*chunk_ptr };
-                            let ci_ptr = lua_state.current_ci_ptr();
                             ci = unsafe { &mut *ci_ptr };
-                            base_stk = ci.base_stk;
+                            base_stk = new_base_stk;
                             pc = 0;
+                            if ccmt_depth > 0 {
+                                ci.call_status |=
+                                    crate::lua_vm::call_info::call_status::set_ccmt_count(
+                                        0, ccmt_depth,
+                                    );
+                            }
+                            chunk = unsafe { &*chunk_ptr };
                             code = &chunk.code;
                             constants = &chunk.constants;
                             trap = current_trap(lua_state);
@@ -1163,6 +1190,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             chunk_ptr,
                             new_upvalue_ptrs,
                         )?;
+                        if ccmt_depth > 0 {
+                            unsafe {
+                                (*lua_state.current_ci_ptr()).call_status |=
+                                    crate::lua_vm::call_info::call_status::set_ccmt_count(
+                                        0, ccmt_depth,
+                                    );
+                            }
+                        }
                         reload_after_call!();
                         continue;
                     }
@@ -1170,6 +1205,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Generic path: C function or metamethod
                     ci.save_pc(pc);
                     if precall(lua_state, func_idx, nargs, nresults)? {
+                        if ccmt_depth > 0 {
+                            unsafe {
+                                (*lua_state.current_ci_ptr()).call_status |=
+                                    crate::lua_vm::call_info::call_status::set_ccmt_count(
+                                        0, ccmt_depth,
+                                    );
+                            }
+                        }
                         reload_after_call!();
                         continue;
                     }
@@ -1514,50 +1557,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
                 }
-                OpCode::Reserved85 => unreachable!(),
-                OpCode::Reserved86 => unreachable!(),
-                OpCode::Reserved87 => unreachable!(),
-                OpCode::Reserved88 => unreachable!(),
-                OpCode::Reserved89 => unreachable!(),
-                OpCode::Reserved90 => unreachable!(),
-                OpCode::Reserved91 => unreachable!(),
-                OpCode::Reserved92 => unreachable!(),
-                OpCode::Reserved93 => unreachable!(),
-                OpCode::Reserved94 => unreachable!(),
-                OpCode::Reserved95 => unreachable!(),
-                OpCode::Reserved96 => unreachable!(),
-                OpCode::Reserved97 => unreachable!(),
-                OpCode::Reserved98 => unreachable!(),
-                OpCode::Reserved99 => unreachable!(),
-                OpCode::Reserved100 => unreachable!(),
-                OpCode::Reserved101 => unreachable!(),
-                OpCode::Reserved102 => unreachable!(),
-                OpCode::Reserved103 => unreachable!(),
-                OpCode::Reserved104 => unreachable!(),
-                OpCode::Reserved105 => unreachable!(),
-                OpCode::Reserved106 => unreachable!(),
-                OpCode::Reserved107 => unreachable!(),
-                OpCode::Reserved108 => unreachable!(),
-                OpCode::Reserved109 => unreachable!(),
-                OpCode::Reserved110 => unreachable!(),
-                OpCode::Reserved111 => unreachable!(),
-                OpCode::Reserved112 => unreachable!(),
-                OpCode::Reserved113 => unreachable!(),
-                OpCode::Reserved114 => unreachable!(),
-                OpCode::Reserved115 => unreachable!(),
-                OpCode::Reserved116 => unreachable!(),
-                OpCode::Reserved117 => unreachable!(),
-                OpCode::Reserved118 => unreachable!(),
-                OpCode::Reserved119 => unreachable!(),
-                OpCode::Reserved120 => unreachable!(),
-                OpCode::Reserved121 => unreachable!(),
-                OpCode::Reserved122 => unreachable!(),
-                OpCode::Reserved123 => unreachable!(),
-                OpCode::Reserved124 => unreachable!(),
-                OpCode::Reserved125 => unreachable!(),
-                OpCode::Reserved126 => unreachable!(),
-                OpCode::Reserved127 => unreachable!(),
-                _ => unreachable!(),
+                // 编译器不会生成保留 opcode；合并为一个 cold 分支，避免 43 个
+                // 独立 panic 块把主循环撑大。
+                _ => unsafe { std::hint::unreachable_unchecked() },
             }
         }
     }

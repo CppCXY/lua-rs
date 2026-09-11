@@ -8,7 +8,7 @@ pub mod call_info;
 mod const_string;
 pub mod debug_info;
 mod error_msg;
-mod execute;
+pub(crate) mod execute;
 mod file_layout;
 pub mod lua_error;
 pub mod lua_limits;
@@ -23,6 +23,7 @@ mod sandbox;
 mod shared_proto;
 pub(crate) mod stk_id;
 mod string_arth;
+mod tm_kind;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
 use crate::gc::{
@@ -53,7 +54,6 @@ pub use crate::lua_vm::sandbox::SandboxConfig;
 use crate::platform_time::{PlatformInstant, unix_nanos};
 use crate::stdlib::Stdlib;
 use crate::{LuaEnum, LuaRegistrable, OpaqueUserData, RustCallback, lib_registry};
-pub use execute::TmKind;
 pub(crate) use execute::arith::{lua_shiftl, luai_numpow};
 pub use execute::{get_metamethod_event, get_metatable};
 pub use lua_rng::LuaRng;
@@ -62,6 +62,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::ptr::NonNull;
 pub use string_arth::*;
+pub use tm_kind::TmKind;
 
 pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua

@@ -494,6 +494,54 @@ impl LuaState {
         Ok(true)
     }
 
+    /// 极薄 Lua 进帧原语。
+    ///
+    /// 与 `try_push_lua_frame_exact` 语义一致，但直接返回新帧的 `CallInfo`
+    /// 指针和 `base_stk`，避免调用方再走一次 `current_ci_ptr()` / `ci.base_stk`
+    /// 往返。仅覆盖物理栈/调用栈已有余量的快路径；任一条件不满足返回
+    /// `None`，由调用方走既有慢路径。
+    ///
+    /// Caller guarantees: 目标 chunk 的 `param_count` 与实参数量一致。
+    #[inline(always)]
+    pub(crate) fn enter_lua_frame_fast(
+        &mut self,
+        base: usize,
+        nresults: i32,
+        frame_top: usize,
+        chunk_ptr: *const LuaProto,
+        upvalue_ptrs: *const UpvaluePtr,
+    ) -> Option<(*mut CallInfo, StkId)> {
+        if self.call_depth >= self.safe_state.max_call_depth {
+            return None;
+        }
+        if frame_top + EXTRA_STACK > self.stack.len() {
+            return None;
+        }
+        let ci = self.try_acquire_call_info_slot()?;
+        let base_stk = StkId::from_stack(self.stack.as_mut_ptr(), base);
+        unsafe {
+            let ci_ref = &mut *ci;
+            ci_ref.base = base;
+            ci_ref.base_stk = base_stk;
+            ci_ref.func_offset = 1;
+            ci_ref.top = frame_top as u32;
+            ci_ref.pc = 0;
+            ci_ref.call_status = call_status::with_nresults(call_status::CIST_LUA, nresults);
+            // 精确实参路径 nextraargs 必为 0；仅 vararg chunk 会读该字段。
+            if !chunk_ptr.is_null() && (*chunk_ptr).is_vararg {
+                ci_ref.nextraargs = 0;
+            }
+            ci_ref.chunk_ptr = chunk_ptr;
+            ci_ref.upvalue_ptrs = upvalue_ptrs;
+        }
+        self.current_ci = ci;
+        self.call_depth += 1;
+        if self.stack_top < frame_top {
+            self.stack_top = frame_top;
+        }
+        Some((ci, base_stk))
+    }
+
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn push_lua_frame(

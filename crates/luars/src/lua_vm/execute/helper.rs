@@ -356,6 +356,7 @@ fn finishget_core(
     Err(lua_state.error("'__index' chain too long; possible loop".to_string()))
 }
 
+#[allow(dead_code)]
 pub fn finishget(
     lua_state: &mut LuaState,
     obj: &LuaValue,
@@ -1267,7 +1268,7 @@ pub fn error_global(lua_state: &mut LuaState, global_name: &str) -> LuaError {
 }
 
 /// Cold path: comparison metamethod fallback for LtI/LeI/GtI/GeI/Lt/Le
-/// Extraced from execute_loop to reduce main function size and improve register allocation.
+/// Extraced from core to reduce main function size and improve register allocation.
 #[cold]
 #[inline(never)]
 pub fn order_tm_fallback(

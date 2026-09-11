@@ -1,7 +1,7 @@
 /*----------------------------------------------------------------------
   Lua 5.5 VM Arithmetic & Bitwise Operations
 
-  Extracted from execute_loop.rs macros into generic #[inline(always)]
+  Extracted from core.rs macros into generic #[inline(always)]
   functions. Each function is monomorphized per call site, producing
   identical machine code to the original macro approach.
 

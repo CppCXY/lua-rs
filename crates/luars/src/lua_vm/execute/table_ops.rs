@@ -1,7 +1,7 @@
 /*----------------------------------------------------------------------
   Lua 5.5 VM Table Operations
 
-  Extracted from execute_loop.rs to separate table GET/SET/CREATE
+  Extracted from core.rs to separate table GET/SET/CREATE
   operations from the main dispatch loop.
 
   Design:
@@ -100,6 +100,11 @@ pub(crate) fn op_get_tabup(
         if table.impl_table.has_hash() && table.impl_table.get_shortstr_into(key, dest.as_ptr()) {
             return Ok(());
         }
+        // 无 metatable 的普通表：miss 就是 nil。
+        if table.meta_ptr().is_null() {
+            dest.set_nil();
+            return Ok(());
+        }
     }
 
     ci.save_pc(*pc);
@@ -156,6 +161,11 @@ pub(crate) fn op_get_table(
             dest.write(&val);
             return Ok(());
         }
+        // 无 metatable 的普通表：miss 就是 nil。
+        if table.meta_ptr().is_null() {
+            dest.set_nil();
+            return Ok(());
+        }
 
         ci.save_pc(pc);
         lua_state.set_top_raw(ci.top as usize);
@@ -203,6 +213,11 @@ pub(crate) fn op_get_i(
         if found {
             return Ok(());
         }
+        // 无 metatable 的普通表：miss 就是 nil。
+        if table.meta_ptr().is_null() {
+            dest.set_nil();
+            return Ok(());
+        }
     }
 
     ci.save_pc(pc);
@@ -233,11 +248,14 @@ pub(crate) fn op_get_field(
     );
     if rb.is_table() {
         let table = rb.hvalue();
-        if table.impl_table.has_hash() {
-            let dest = base.offset(instr.get_a() as usize);
-            if table.impl_table.get_shortstr_into(key, dest.as_ptr()) {
-                return Ok(());
-            }
+        let dest = base.offset(instr.get_a() as usize);
+        if table.impl_table.has_hash() && table.impl_table.get_shortstr_into(key, dest.as_ptr()) {
+            return Ok(());
+        }
+        // 无 metatable 的普通表：miss 就是 nil，直接写回，不走 finishget。
+        if table.meta_ptr().is_null() {
+            dest.set_nil();
+            return Ok(());
         }
     }
     ci.save_pc(pc);
@@ -751,7 +769,7 @@ pub(crate) fn op_new_table(
 }
 
 /// Self_: R[A+1] := R[B]; R[A] := R[B][K[C]:string]
-#[inline]
+#[inline(always)]
 pub(crate) fn op_self(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
@@ -763,29 +781,35 @@ pub(crate) fn op_self(
 ) -> LuaResult<()> {
     let a = instr.get_a();
     let base = *base_stk;
-    let rb = base.offset(instr.get_b() as usize).get();
+    let rb_stk = base.offset(instr.get_b() as usize);
     let key = k_val(constants, instr.get_c());
+    let dest = base.offset(a as usize);
 
     debug_assert!(
         key.is_short_string(),
         "Self key must be short string for fast path"
     );
-    base.offset(a as usize + 1).write(&rb);
+    // R[A+1] := R[B]
+    dest.offset(1).set(rb_stk);
     // Fast path: rb is a table with hash part
-    if rb.ttistable() {
-        let table = rb.hvalue();
-        if table.impl_table.has_hash() {
-            let dest = base.offset(a as usize);
-            if table.impl_table.get_shortstr_into(key, dest.as_ptr()) {
-                return Ok(());
-            }
+    if rb_stk.is_table() {
+        let table = rb_stk.hvalue();
+        if table.impl_table.has_hash() && table.impl_table.get_shortstr_into(key, dest.as_ptr()) {
+            return Ok(());
         }
-        if self_shortstr_index_chain_fast(lua_state, &rb, key, base.offset(a as usize)) {
+        // 普通表 miss：nil 直写，不走 finishget。
+        if table.meta_ptr().is_null() {
+            dest.set_nil();
+            return Ok(());
+        }
+        let rb = rb_stk.get();
+        if self_shortstr_index_chain_fast(lua_state, &rb, key, dest) {
             *base_stk = ci.base_stk;
             updatetrap!(trap, lua_state);
             return Ok(());
         }
     }
+    let rb = rb_stk.get();
 
     ci.save_pc(pc);
     lua_state.set_top_raw(ci.top as usize);

@@ -14,7 +14,6 @@ categories = ["development-tools"]
 doctest = false
 
 [features]
-default = []
 serde = ["dep:serde", "dep:serde_json"]
 sandbox = []
 shared-proto = []

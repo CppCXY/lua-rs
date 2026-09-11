@@ -6,12 +6,16 @@ use crate::{
     gc::UpvaluePtr,
     lua_vm::{
         CFunction, LUA_HOOKCALL, LUA_HOOKRET, LuaResult, LuaState, StkId, TmKind,
-        call_info::call_status, execute::hook::hook_on_return, get_metamethod_event,
+        call_info::call_status,
+        execute::{
+            helper::{get_metamethod_event, get_metamethod_from_meta_ptr},
+            hook::hook_on_return,
+        },
         lua_limits::EXTRA_STACK,
     },
 };
 
-#[inline]
+#[inline(always)]
 fn insert_callable_before_args(
     lua_state: &mut LuaState,
     func_idx: usize,
@@ -27,7 +31,18 @@ fn insert_callable_before_args(
     }
 
     let stack = lua_state.stack_mut();
-    stack.copy_within(first_arg..first_arg + arg_count, first_arg + 1);
+    // __call 的实参通常很少；小参数用逐元素搬移，避免 memmove 调用开销。
+    if arg_count != 0 {
+        if arg_count <= 4 {
+            let mut i = arg_count;
+            while i > 0 {
+                stack[first_arg + i] = stack[func_idx + i];
+                i -= 1;
+            }
+        } else {
+            stack.copy_within(first_arg..first_arg + arg_count, first_arg + 1);
+        }
+    }
     stack[first_arg] = original_func;
     stack[func_idx] = callable;
 
@@ -36,9 +51,41 @@ fn insert_callable_before_args(
 }
 
 /// Resolve __call metamethod chain in place
+/// 单步解析 table 的 __call，并原地把 callable 插入到实参前。
+///
+/// 返回值：`Some((mm, new_arg_count))` 表示已插入 mm，调用方应重试；
+/// `None` 表示 fast path 不适用（不是 table / 没有 metatable / 没有 __call），
+/// 由调用方回退通用解析。
+#[inline(always)]
+pub(crate) fn insert_table_call_mm(
+    lua_state: &mut LuaState,
+    func_idx: usize,
+    arg_count: usize,
+    ccmt_depth: u8,
+) -> LuaResult<Option<(LuaValue, usize)>> {
+    let func = lua_state.stack()[func_idx];
+    if !func.is_table() {
+        return Ok(None);
+    }
+    let meta = func.hvalue().meta_ptr();
+    if meta.is_null() {
+        return Ok(None);
+    }
+    let Some(mm) = get_metamethod_from_meta_ptr(lua_state, meta, TmKind::Call) else {
+        return Ok(None);
+    };
+    if ccmt_depth == 15 {
+        return Err(lua_state.error("'__call' chain too long".to_string()));
+    }
+    let new_arg_count = insert_callable_before_args(lua_state, func_idx, arg_count, mm, func)?;
+    Ok(Some((mm, new_arg_count)))
+}
+
+/// Resolve __call metamethod chain in place
 /// Modifies stack to replace non-callable with its __call chain
 /// Returns (actual_arg_count, ccmt_depth) after resolution
 /// func_idx position stays the same, but stack content is modified
+#[inline]
 pub fn resolve_call_chain(
     lua_state: &mut LuaState,
     func_idx: usize,
@@ -416,6 +463,7 @@ pub fn precall(
 }
 
 /// Resolve __call chain then retry.
+#[inline]
 fn precall_meta(
     lua_state: &mut LuaState,
     func_idx: usize,
